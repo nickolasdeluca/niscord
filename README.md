@@ -6,7 +6,7 @@ online and who is live, and you can watch each other's screens or individual win
 
 Everything is native Rust: the GUI uses [Slint](https://slint.dev). Video goes
 peer-to-peer over WebRTC, so the server only coordinates who talks to whom and never
-carries video. When a direct connection is impossible (for example behind carrier-grade
+carries video or audio. When a direct connection is impossible (for example behind carrier-grade
 NAT), media is relayed through a TURN server you also host.
 
 ## Status
@@ -17,8 +17,8 @@ NAT), media is relayed through a TURN server you also host.
 | 2. Screen/window picker with live thumbnails, local preview of your share | ✅ done |
 | 3. H.264 encode/decode pipeline; your preview shows what viewers will get, with live stats | ✅ done |
 | 4. WebRTC between friends: Watch shows the live stream, bitrate follows the network | ✅ done |
-| 5. Audio: system-wide or per-app loopback, Opus | ⏳ next |
-| 6. Quality: hardware encoding, bitrate adaptation, keyframe recovery | |
+| 5. Audio: a window shares its app's sound, a screen shares everything but Niscord; Opus | ✅ done |
+| 6. Quality: hardware encoding, bitrate adaptation, keyframe recovery | ⏳ next |
 | 7. Packaging: portable `.exe`, server release binaries | |
 
 ## Layout
@@ -26,8 +26,9 @@ NAT), media is relayed through a TURN server you also host.
 ```
 crates/
   protocol/   JSON messages shared by app and server
-  media/      capture (Windows Graphics Capture), H.264 (OpenH264), encode/decode threads
-  transport/  WebRTC (webrtc-rs): one connection per sharer/viewer pair, frame reassembly
+  media/      capture (Windows Graphics Capture), H.264 (OpenH264), encode/decode threads,
+              audio (WASAPI process loopback, Opus via unsafe-libopus)
+  transport/  WebRTC (webrtc-rs): one connection per sharer/viewer pair, H.264 + Opus tracks
   server/     signaling server (presence, watch requests, WebRTC signaling relay)
   app/        the Slint desktop app (`niscord.exe`)
 ```
@@ -60,8 +61,29 @@ cargo run -p niscord-media --example probe
 cargo run --release -p niscord-media --example bench_codec -- 1920 1080 30
 ```
 
+To check audio capture on this machine (plays a very quiet tone and captures it):
+
+```sh
+cargo run --release -p niscord-media --example audio_probe
+```
+
 Screen capture needs Windows 10 version 1903 or later. On Windows 10, Windows draws a
 yellow border around whatever is being captured; on Windows 11 Niscord hides it.
+
+### Audio
+
+"Share audio" in the picker sends sound along with the picture:
+
+* **A window** shares only its app's sound (and its child processes', which covers
+  browsers that play audio from a helper process).
+* **A screen** shares everything you hear except Niscord itself, so the streams you
+  are watching don't echo back to their sharers. Other voice apps are *not* excluded:
+  if you are in a Discord call while sharing a screen, your friends hear the call too.
+  Share a window instead to avoid that.
+
+Per-app capture needs Windows 10 version 2004 or later; on older versions Niscord
+shares the picture without sound. Viewers get a mute button and volume slider on each
+stream.
 
 ### Testing WebRTC on one machine
 

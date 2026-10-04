@@ -1,5 +1,6 @@
 //! WebRTC transport for Niscord: one peer connection per (sharer, viewer)
-//! pair, carrying a single H.264 video track from sharer to viewer.
+//! pair, carrying an H.264 video track and optionally an Opus audio track
+//! from sharer to viewer.
 //!
 //! * [`OutgoingPeer`] runs on the sharer for each viewer. It makes the offer,
 //!   sends encoded frames, reports keyframe requests from the viewer, and
@@ -66,6 +67,12 @@ pub trait OutgoingEvents: PeerEvents {
 pub trait IncomingEvents: PeerEvents {
     /// One complete H.264 access unit (Annex B).
     fn frame(&self, data: Bytes, keyframe: bool);
+
+    /// One Opus packet (20 ms). `lost` packets went missing just before it;
+    /// the decoder fills them in.
+    fn audio(&self, packet: Bytes, lost: usize) {
+        let _ = (packet, lost);
+    }
 }
 
 /// Whether an Annex B access unit contains an IDR slice or SPS, i.e. can be

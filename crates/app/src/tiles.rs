@@ -46,6 +46,10 @@ impl App {
         self.tiles.iter().position(|t| t.key == key)
     }
 
+    pub fn tile(&self, key: &str) -> Option<StreamTile> {
+        self.tile_row(key).and_then(|row| self.tiles.row_data(row))
+    }
+
     pub fn has_tile(&self, key: &str) -> bool {
         self.tile_row(key).is_some()
     }
@@ -135,5 +139,8 @@ pub fn new_tile(key: impl Into<slint::SharedString>, name: &str, title: &str, is
         status: "Connecting…".into(),
         is_self,
         failed: false,
+        has_audio: false,
+        volume: 1.0,
+        muted: false,
     }
 }

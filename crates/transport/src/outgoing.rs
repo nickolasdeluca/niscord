@@ -1,4 +1,4 @@
-//! Sharer side: sends one H.264 track to one viewer.
+//! Sharer side: sends an H.264 track (and optionally Opus) to one viewer.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,7 +14,7 @@ use rtc::peer_connection::configuration::interceptor_registry::{
 };
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::rtp_transceiver::PayloadType;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind};
+use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind};
 use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
 use webrtc::media_stream::track_local::{TrackLocal, TrackLocalEvent};
 use webrtc::peer_connection::{PeerConnection, PeerConnectionEventHandler, RTCPeerConnectionState};
@@ -92,22 +92,67 @@ impl PeerConnectionEventHandler for Handler {
     }
 }
 
-pub struct OutgoingPeer {
-    pc: Arc<dyn PeerConnection>,
+/// One sending track and what it needs to write samples.
+struct SendTrack {
     track: Arc<TrackLocalStaticSample>,
     sender: Arc<dyn RtpSender>,
     ssrc: u32,
+    /// Known once the viewer answered.
     payload_type: Mutex<Option<PayloadType>>,
+}
+
+impl SendTrack {
+    async fn add(pc: &Arc<dyn PeerConnection>, kind: RtpCodecKind, id: &str, codec: RTCRtpCodec) -> Result<Self> {
+        let ssrc = rand_ssrc();
+        let track = Arc::new(TrackLocalStaticSample::new(
+            Instant::now(),
+            MediaStreamTrack::new(
+                "niscord".into(),
+                id.into(),
+                id.into(),
+                kind,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(ssrc), ..Default::default() },
+                    codec,
+                    ..Default::default()
+                }],
+            ),
+        )?);
+        let sender = pc.add_track(track.clone() as Arc<dyn TrackLocal>).await?;
+        Ok(Self { track, sender, ssrc, payload_type: Mutex::new(None) })
+    }
+
+    async fn negotiated(&self) -> Result<()> {
+        let parameters = self.sender.get_parameters().await?;
+        let pt = parameters.rtp_parameters.codecs.first().map(|c| c.payload_type);
+        *self.payload_type.lock().unwrap() = Some(pt.context("viewer accepted no codec")?);
+        Ok(())
+    }
+
+    async fn send(&self, data: Bytes, duration: Duration) -> Result<()> {
+        let Some(pt) = *self.payload_type.lock().unwrap() else { return Ok(()) };
+        let sample = Sample { data, duration, ..Sample::new(Instant::now()) };
+        self.track.sample_writer(self.ssrc, pt).write_sample(&sample).await?;
+        Ok(())
+    }
+}
+
+pub struct OutgoingPeer {
+    pc: Arc<dyn PeerConnection>,
+    video: SendTrack,
+    audio: Option<SendTrack>,
     connected: Arc<AtomicBool>,
     target_bitrate: Arc<AtomicU64>,
     candidates: CandidateBuffer,
 }
 
 impl OutgoingPeer {
-    /// Create the connection and send the offer through `events`.
+    /// Create the connection and send the offer through `events`. With
+    /// `audio`, an Opus track goes along with the video.
     pub async fn start(
         config: &TransportConfig,
         limits: BitrateLimits,
+        audio: bool,
         events: Arc<dyn OutgoingEvents>,
     ) -> Result<Self> {
         let mut engine = common::media_engine()?;
@@ -128,26 +173,15 @@ impl OutgoingPeer {
         });
         let pc = common::build_peer_connection(config, engine, registry, handler).await?;
 
-        let ssrc = rand_ssrc();
-        let track = Arc::new(TrackLocalStaticSample::new(
-            Instant::now(),
-            MediaStreamTrack::new(
-                "niscord".into(),
-                "screen".into(),
-                "screen".into(),
-                RtpCodecKind::Video,
-                vec![RTCRtpEncodingParameters {
-                    rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(ssrc), ..Default::default() },
-                    codec: common::video_codec().rtp_codec,
-                    ..Default::default()
-                }],
-            ),
-        )?);
-        let sender = pc.add_track(track.clone() as Arc<dyn TrackLocal>).await?;
+        let video = SendTrack::add(&pc, RtpCodecKind::Video, "screen", common::video_codec().rtp_codec).await?;
+        let audio = match audio {
+            true => Some(SendTrack::add(&pc, RtpCodecKind::Audio, "audio", common::audio_codec().rtp_codec).await?),
+            false => None,
+        };
 
         // Keyframe requests (PLI/FIR) from the viewer.
         {
-            let track = track.clone();
+            let track = video.track.clone();
             let events = events.clone();
             tokio::spawn(async move {
                 while let Some(event) = track.poll().await {
@@ -162,16 +196,7 @@ impl OutgoingPeer {
         pc.set_local_description(offer.clone()).await?;
         events.signal(common::offer_signal(&offer));
 
-        Ok(Self {
-            pc,
-            track,
-            sender,
-            ssrc,
-            payload_type: Mutex::new(None),
-            connected,
-            target_bitrate,
-            candidates: CandidateBuffer::default(),
-        })
+        Ok(Self { pc, video, audio, connected, target_bitrate, candidates: CandidateBuffer::default() })
     }
 
     /// Apply the viewer's answer or one of its ICE candidates.
@@ -179,9 +204,10 @@ impl OutgoingPeer {
         match data {
             SignalData::Answer { sdp } => {
                 self.pc.set_remote_description(RTCSessionDescription::answer(sdp)?).await?;
-                let parameters = self.sender.get_parameters().await?;
-                let pt = parameters.rtp_parameters.codecs.first().map(|c| c.payload_type);
-                *self.payload_type.lock().unwrap() = Some(pt.context("viewer accepted no codec")?);
+                self.video.negotiated().await?;
+                if let Some(audio) = &self.audio {
+                    audio.negotiated().await?;
+                }
                 common::add_candidates(&self.pc, self.candidates.release()).await;
             }
             SignalData::Candidate { candidate } => {
@@ -203,10 +229,15 @@ impl OutgoingPeer {
         if !self.is_connected() {
             return Ok(());
         }
-        let Some(pt) = *self.payload_type.lock().unwrap() else { return Ok(()) };
-        let sample = Sample { data, duration, ..Sample::new(Instant::now()) };
-        self.track.sample_writer(self.ssrc, pt).write_sample(&sample).await?;
-        Ok(())
+        self.video.send(data, duration).await
+    }
+
+    /// Send one Opus packet. Ignored without an audio track or connection.
+    pub async fn send_audio(&self, packet: Bytes, duration: Duration) -> Result<()> {
+        match &self.audio {
+            Some(audio) if self.is_connected() => audio.send(packet, duration).await,
+            _ => Ok(()),
+        }
     }
 
     /// Current bandwidth estimate towards this viewer, in bits per second.

@@ -1,4 +1,4 @@
-//! Viewer side: receives one H.264 track from one sharer.
+//! Viewer side: receives the H.264 track (and Opus, if any) from one sharer.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -8,6 +8,7 @@ use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use webrtc::peer_connection::{PeerConnection, PeerConnectionEventHandler, RTCPeerConnectionState};
 
@@ -40,6 +41,10 @@ impl PeerConnectionEventHandler for Handler {
     }
 
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+        if track.kind().await == RtpCodecKind::Audio {
+            tokio::spawn(audio_loop(track, self.events.clone()));
+            return;
+        }
         let Some(ssrc) = track.ssrcs().await.first().copied() else {
             tracing::warn!("remote track has no SSRC");
             return;
@@ -81,6 +86,51 @@ async fn receive_loop(track: Arc<dyn TrackRemote>, ssrc: u32, events: Arc<dyn In
         if assembler.stalled(now) {
             request_keyframe(&track, ssrc, &mut last_request).await;
         }
+    }
+}
+
+/// Hands Opus packets on in order, counting the ones lost before each.
+async fn audio_loop(track: Arc<dyn TrackRemote>, events: Arc<dyn IncomingEvents>) {
+    let mut sequence = AudioSequence::default();
+    while let Some(event) = track.poll().await {
+        match event {
+            TrackRemoteEvent::OnRtpPacket(packet) => {
+                if let Some(lost) = sequence.accept(packet.header.sequence_number) {
+                    events.audio(packet.payload, lost);
+                }
+            }
+            TrackRemoteEvent::OnEnded => break,
+            _ => {}
+        }
+    }
+}
+
+/// RTP sequence tracking for audio, where late packets are useless: the
+/// decoder already concealed them.
+#[derive(Default)]
+struct AudioSequence {
+    next: Option<u16>,
+}
+
+/// A jump bigger than this is a restart, not loss.
+const MAX_AUDIO_GAP: u16 = 50;
+
+impl AudioSequence {
+    /// How many packets were lost before this one, or `None` to drop it
+    /// (duplicate or arrived too late).
+    fn accept(&mut self, seq: u16) -> Option<usize> {
+        let lost = match self.next {
+            None => 0,
+            Some(next) => {
+                let ahead = seq.wrapping_sub(next);
+                if ahead >= u16::MAX / 2 {
+                    return None; // behind: late or duplicate
+                }
+                if ahead > MAX_AUDIO_GAP { 0 } else { ahead as usize }
+            }
+        };
+        self.next = Some(seq.wrapping_add(1));
+        Some(lost)
     }
 }
 
@@ -158,5 +208,23 @@ impl IncomingPeer {
         if let Err(err) = self.pc.close().await {
             tracing::debug!("closing incoming peer: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioSequence;
+
+    #[test]
+    fn audio_sequence_counts_loss_and_drops_late_packets() {
+        let mut seq = AudioSequence::default();
+        assert_eq!(seq.accept(65_534), Some(0));
+        assert_eq!(seq.accept(65_535), Some(0));
+        assert_eq!(seq.accept(1), Some(1), "0 lost, across the wrap");
+        assert_eq!(seq.accept(0), None, "late");
+        assert_eq!(seq.accept(1), None, "duplicate");
+        assert_eq!(seq.accept(4), Some(2));
+        assert_eq!(seq.accept(1_000), Some(0), "restart, not loss");
+        assert_eq!(seq.accept(1_001), Some(0));
     }
 }

@@ -45,6 +45,7 @@ pub struct Settings {
     pub password: String,
     pub resolution: Resolution,
     pub fps: u32,
+    pub share_audio: bool,
 }
 
 impl Default for Settings {
@@ -55,6 +56,7 @@ impl Default for Settings {
             password: String::new(),
             resolution: Resolution::default(),
             fps: 30,
+            share_audio: true,
         }
     }
 }

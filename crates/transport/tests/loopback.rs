@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use niscord_media::RgbaImage;
+use niscord_media::audio::{DEFAULT_BITRATE, FRAME_DURATION, FRAME_LEN, OpusDecoder, OpusEncoder};
 use niscord_media::video::{EncoderSettings, VideoDecoder, VideoEncoder};
 use niscord_transport::{
     BitrateLimits, IncomingEvents, IncomingPeer, OutgoingEvents, OutgoingPeer, PeerEvents, PeerState, SignalData,
@@ -39,6 +40,7 @@ struct ViewerSide {
     signals: mpsc::UnboundedSender<SignalData>,
     state: watch::Sender<PeerState>,
     frames: mpsc::UnboundedSender<(Bytes, bool, std::time::Instant)>,
+    audio: mpsc::UnboundedSender<(Bytes, usize)>,
 }
 
 impl PeerEvents for ViewerSide {
@@ -53,6 +55,9 @@ impl PeerEvents for ViewerSide {
 impl IncomingEvents for ViewerSide {
     fn frame(&self, data: Bytes, keyframe: bool) {
         let _ = self.frames.send((data, keyframe, std::time::Instant::now()));
+    }
+    fn audio(&self, packet: Bytes, lost: usize) {
+        let _ = self.audio.send((packet, lost));
     }
 }
 
@@ -84,11 +89,13 @@ async fn video_flows_from_sharer_to_viewer() {
 
     let sharer_side =
         Arc::new(SharerSide { signals: to_viewer, state: sharer_state_tx, keyframe_requests: AtomicU32::new(0) });
-    let viewer_side = Arc::new(ViewerSide { signals: to_sharer, state: viewer_state_tx, frames: frames_tx });
+    let (audio_tx, mut audio) = mpsc::unbounded_channel();
+    let viewer_side =
+        Arc::new(ViewerSide { signals: to_sharer, state: viewer_state_tx, frames: frames_tx, audio: audio_tx });
 
     let viewer = Arc::new(IncomingPeer::start(&config, viewer_side.clone()).await.unwrap());
     let limits = BitrateLimits { initial: 1_000_000, min: 200_000, max: 4_000_000 };
-    let sharer = Arc::new(OutgoingPeer::start(&config, limits, sharer_side.clone()).await.unwrap());
+    let sharer = Arc::new(OutgoingPeer::start(&config, limits, true, sharer_side.clone()).await.unwrap());
 
     // Signaling relay, preserving order like the real server does.
     let pump_viewer = {
@@ -112,7 +119,9 @@ async fn video_flows_from_sharer_to_viewer() {
     wait_for(&mut viewer_state, PeerState::Connected).await;
     assert!(sharer.is_connected());
 
-    // Stream ~2 s of 30 fps video, honouring keyframe requests.
+    // Stream ~2 s of 30 fps video, honouring keyframe requests, with audio
+    // alongside (a 20 ms Opus packet per frame is enough to prove it flows).
+    let mut opus = OpusEncoder::new(DEFAULT_BITRATE).unwrap();
     let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 1_000_000 }).unwrap();
     let mut answered = 0;
     let sent = 60;
@@ -127,6 +136,8 @@ async fn video_flows_from_sharer_to_viewer() {
             sent_at.push(std::time::Instant::now());
             sharer.send_frame(Bytes::from(frame.data), Duration::from_millis(33)).await.unwrap();
         }
+        let packet = opus.encode(&vec![0.1; FRAME_LEN]).unwrap();
+        sharer.send_audio(Bytes::from(packet), FRAME_DURATION).await.unwrap();
         tokio::time::sleep(Duration::from_millis(33)).await;
     }
 
@@ -167,6 +178,17 @@ async fn video_flows_from_sharer_to_viewer() {
     assert_eq!(decoded, sent, "frames decoded");
     assert!(median < Duration::from_millis(20), "median delay {median:?}");
     assert!(sharer_side.keyframe_requests.load(Ordering::Relaxed) >= 1, "viewer never asked for a keyframe");
+
+    // Every audio packet arrives, decodable, with nothing reported lost.
+    let mut opus = OpusDecoder::new().unwrap();
+    let mut packets = 0;
+    while let Ok(Some((packet, lost))) = tokio::time::timeout(Duration::from_millis(500), audio.recv()).await {
+        assert_eq!(lost, 0);
+        assert_eq!(opus.decode(&packet).unwrap().len(), FRAME_LEN);
+        packets += 1;
+    }
+    println!("audio packets {packets}/{sent}");
+    assert_eq!(packets, sent, "audio packets arrived");
 
     // Asking for a keyframe from the viewer side reaches the sharer.
     let before = sharer_side.keyframe_requests.load(Ordering::Relaxed);

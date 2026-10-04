@@ -1,4 +1,4 @@
-import { Button, ComboBox, Palette, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, Palette, ScrollView } from "std-widgets.slint";
 
 export struct SourceItem {
     // Index into the Rust-side source list; unique across both tabs.
@@ -116,6 +116,7 @@ export component SharePicker inherits Rectangle {
     // Indices into the resolution and frame-rate choices.
     in-out property <int> resolution: 1;
     in-out property <int> fps: 1;
+    in-out property <bool> audio: true;
     callback cancel();
     callback choose(int);
 
@@ -193,6 +194,13 @@ export component SharePicker inherits Rectangle {
                     model: ["15 fps", "30 fps", "60 fps"];
                     width: 120px;
                     current-index <=> root.fps;
+                }
+                Rectangle { width: 8px; }
+                // A window shares its app's sound; a screen shares everything
+                // except Niscord itself (so streams you watch don't echo back).
+                CheckBox {
+                    text: "Share audio";
+                    checked <=> root.audio;
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Button {

@@ -206,6 +206,8 @@ component MainScreen inherits Rectangle {
     callback stop-share();
     callback close-stream(string);
     callback retry-stream(string);
+    callback set-volume(string, float);
+    callback toggle-mute(string);
     callback disconnect();
     callback about();
 
@@ -294,6 +296,8 @@ component MainScreen inherits Rectangle {
             focused <=> root.focused;
             close(key) => { root.close-stream(key); }
             retry(key) => { root.retry-stream(key); }
+            set-volume(key, value) => { root.set-volume(key, value); }
+            toggle-mute(key) => { root.toggle-mute(key); }
             change-source => { root.share(); }
         }
     }
@@ -331,6 +335,7 @@ export component AppWindow inherits Window {
     in-out property <int> picker-selected: -1;
     in-out property <int> picker-resolution: 1;
     in-out property <int> picker-fps: 1;
+    in-out property <bool> picker-audio: true;
 
     callback connect();
     callback disconnect();
@@ -341,6 +346,8 @@ export component AppWindow inherits Window {
     callback stop-share();
     callback close-stream(string);
     callback retry-stream(string);
+    callback set-volume(string, float);
+    callback toggle-mute(string);
     callback picker-cancel();
     callback picker-choose(int);
 
@@ -390,6 +397,8 @@ export component AppWindow inherits Window {
         focused <=> root.focused-stream;
         close-stream(key) => { root.close-stream(key); }
         retry-stream(key) => { root.retry-stream(key); }
+        set-volume(key, value) => { root.set-volume(key, value); }
+        toggle-mute(key) => { root.toggle-mute(key); }
         watch(id) => { root.watch(id); }
         unwatch(id) => { root.unwatch(id); }
         share => { root.share(); }
@@ -405,6 +414,7 @@ export component AppWindow inherits Window {
         selected <=> root.picker-selected;
         resolution <=> root.picker-resolution;
         fps <=> root.picker-fps;
+        audio <=> root.picker-audio;
         cancel => { root.picker-cancel(); }
         choose(key) => { root.picker-choose(key); }
     }

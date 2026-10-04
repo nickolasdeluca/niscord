@@ -1,4 +1,4 @@
-import { Button, Palette } from "std-widgets.slint";
+import { Button, Palette, Slider } from "std-widgets.slint";
 
 export struct StreamTile {
     // "self" for your own stream, otherwise the sharer's peer id.
@@ -12,6 +12,11 @@ export struct StreamTile {
     status: string,
     is-self: bool,
     failed: bool,
+    // Whether the stream's audio is playing (remote streams only).
+    has-audio: bool,
+    // Playback volume 0..1, and mute (which keeps the volume).
+    volume: float,
+    muted: bool,
 }
 
 component LiveBadge inherits Rectangle {
@@ -34,6 +39,8 @@ component Tile inherits Rectangle {
     callback retry();
     callback change-source();
     callback toggle-focus();
+    callback set-volume(float);
+    callback toggle-mute();
 
     background: black;
     border-radius: 8px;
@@ -112,11 +119,37 @@ component Tile inherits Rectangle {
         }
     }
 
+    // Audio.
+    if root.tile.has-audio: Rectangle {
+        x: parent.width - self.width - 10px;
+        y: parent.height - self.height - 10px;
+        width: audio.preferred-width;
+        height: audio.preferred-height;
+        background: #000000a0;
+        border-radius: 6px;
+        audio := HorizontalLayout {
+            padding: 4px;
+            spacing: 4px;
+            Button {
+                text: root.tile.muted ? "Unmute" : "Mute";
+                clicked => { root.toggle-mute(); }
+            }
+            Slider {
+                width: 110px;
+                minimum: 0;
+                maximum: 1;
+                value: root.tile.volume;
+                enabled: !root.tile.muted;
+                changed(value) => { root.set-volume(value); }
+            }
+        }
+    }
+
     // Stats.
     if root.tile.stats != "": Rectangle {
         x: 10px;
         y: parent.height - self.height - 10px;
-        width: min(stats.preferred-width + 12px, parent.width - 20px);
+        width: min(stats.preferred-width + 12px, parent.width - 20px - (root.tile.has-audio ? 190px : 0px));
         height: stats.preferred-height + 8px;
         background: #000000a0;
         border-radius: 6px;
@@ -137,6 +170,8 @@ export component Stage inherits Rectangle {
     callback close(string);
     callback retry(string);
     callback change-source();
+    callback set-volume(string, float);
+    callback toggle-mute(string);
 
     property <length> gap: 10px;
     property <length> pad: 16px;
@@ -175,6 +210,8 @@ export component Stage inherits Rectangle {
         close => { root.close(tile.key); }
         retry => { root.retry(tile.key); }
         change-source => { root.change-source(); }
+        set-volume(value) => { root.set-volume(tile.key, value); }
+        toggle-mute => { root.toggle-mute(tile.key); }
         toggle-focus => { root.focused = self.is-focused ? "" : tile.key; }
     }
 }

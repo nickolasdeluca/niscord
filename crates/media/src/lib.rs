@@ -4,12 +4,15 @@
 //! single windows, including GPU-rendered ones such as games. On other
 //! platforms every entry point reports [`Error::Unsupported`].
 
+pub mod audio;
 mod pace;
 pub mod pipeline;
 mod scale;
 pub mod video;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub mod windows_audio;
 
 use std::time::Duration;
 
@@ -58,6 +61,8 @@ pub struct Source {
     pub primary: bool,
     /// Minimized windows can't be captured until restored.
     pub minimized: bool,
+    /// Process owning the window, whose audio goes with it. `None` for screens.
+    pub process_id: Option<u32>,
 }
 
 /// A tightly packed RGBA8 image.

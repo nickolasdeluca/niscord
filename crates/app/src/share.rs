@@ -1,4 +1,4 @@
-//! Choosing a source to share and running the video pipeline.
+//! Choosing a source to share and running the video (and audio) pipelines.
 //!
 //! Until peers can connect, the encoded stream is decoded locally, so the
 //! preview shows exactly what viewers will get, with live stats.
@@ -10,8 +10,10 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
+use niscord_media::audio::DEFAULT_BITRATE;
 use niscord_media::pipeline::{EncodedSink, Snapshot, StreamSettings, VideoReceiver, VideoSender};
 use niscord_media::video::{EncodedFrame, suggested_bitrate};
+use niscord_media::windows_audio::{AudioSender, AudioSource};
 use niscord_media::{RgbaImage, Source, SourceKind};
 use niscord_protocol::{ClientMsg, ShareKind};
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
@@ -34,7 +36,10 @@ pub struct ActiveShare {
     // the receiver) must stop before the receiver.
     sender: VideoSender,
     receiver: Arc<VideoReceiver>,
+    audio: Option<AudioSender>,
     last_stats: Cell<(Snapshot, Snapshot)>,
+    /// Audio bytes and when they were counted, for the audio bitrate.
+    last_audio: Cell<(u64, Instant)>,
 }
 
 fn to_pixel_buffer(image: &RgbaImage) -> SharedPixelBuffer<Rgba8Pixel> {
@@ -97,6 +102,7 @@ impl App {
         let settings = Settings::load();
         ui.set_picker_resolution(Resolution::ALL.iter().position(|r| *r == settings.resolution).unwrap_or(1) as i32);
         ui.set_picker_fps(FRAME_RATES.iter().position(|f| *f == settings.fps).unwrap_or(1) as i32);
+        ui.set_picker_audio(settings.share_audio);
         ui.set_picker_open(true);
         *self.picker.borrow_mut() = Some(Picker { sources, windows, screens, _thumbnails: job });
     }
@@ -132,18 +138,20 @@ impl App {
         let ui = self.ui();
         let resolution = Resolution::ALL.get(ui.get_picker_resolution() as usize).copied().unwrap_or_default();
         let fps = FRAME_RATES.get(ui.get_picker_fps() as usize).copied().unwrap_or(30);
+        let audio = ui.get_picker_audio();
         let mut settings = Settings::load();
         settings.resolution = resolution;
         settings.fps = fps;
+        settings.share_audio = audio;
         settings.save();
 
         self.close_picker();
         if let Some(source) = source {
-            self.start_share(source, resolution, fps);
+            self.start_share(source, resolution, fps, audio);
         }
     }
 
-    fn start_share(&self, source: Source, resolution: Resolution, fps: u32) {
+    fn start_share(&self, source: Source, resolution: Resolution, fps: u32, share_audio: bool) {
         // Release the previous pipeline before starting a new one.
         let was_sharing = self.share.borrow_mut().take().is_some();
         let generation = self.share_generation.get() + 1;
@@ -180,13 +188,37 @@ impl App {
             links.set_encoder(Some(sender.control()), settings.bitrate_bps);
         }
 
+        let audio = if share_audio { self.start_audio(&source, links.clone()) } else { None };
+
         let mut tile = new_tile(SELF_KEY, "You", &source.title, true);
         tile.status = "Starting…".into();
         self.upsert_tile(tile);
         self.ui().set_sharing(true);
         let last_stats = Cell::new((sender.counters().snapshot(), receiver.counters().snapshot()));
-        *self.share.borrow_mut() = Some(ActiveShare { source, sender, receiver, last_stats });
+        let last_audio = Cell::new((0, Instant::now()));
+        *self.share.borrow_mut() = Some(ActiveShare { source, sender, receiver, audio, last_stats, last_audio });
         self.announce_share();
+    }
+
+    /// Capture the source's sound: a window's app, or for a screen,
+    /// everything but Niscord (so the streams we watch don't echo back).
+    fn start_audio(&self, source: &Source, links: Option<Arc<Links>>) -> Option<AudioSender> {
+        let links = links?;
+        let audio_source = match (source.kind, source.process_id) {
+            (SourceKind::Window, Some(pid)) => AudioSource::Process(pid),
+            _ => AudioSource::AllExcept(std::process::id()),
+        };
+        let started = AudioSender::start(audio_source, DEFAULT_BITRATE, move |packet| {
+            links.send_audio(Bytes::from(packet));
+        });
+        match started {
+            Ok(sender) => Some(sender),
+            Err(err) => {
+                tracing::warn!(?audio_source, "could not capture audio: {err}");
+                self.show_notice(format!("Sharing without sound: {err}"));
+                None
+            }
+        }
     }
 
     /// Tell the server what we're sharing (again, after a reconnect).
@@ -196,7 +228,8 @@ impl App {
                 SourceKind::Screen => ShareKind::Screen,
                 SourceKind::Window => ShareKind::Window,
             };
-            self.send(ClientMsg::ShareStart { kind, title: share.source.title.clone(), audio: false });
+            let audio = share.audio.is_some();
+            self.send(ClientMsg::ShareStart { kind, title: share.source.title.clone(), audio });
         }
     }
 
@@ -249,6 +282,14 @@ impl App {
         }
         if e.skipped > 0 {
             text += &format!(" · {} skipped by encoder", e.skipped);
+        }
+        if let Some(audio) = &share.audio {
+            let (prev_bytes, prev_at) = share.last_audio.get();
+            let bytes = audio.bytes();
+            let now = Instant::now();
+            share.last_audio.set((bytes, now));
+            let secs = now.duration_since(prev_at).as_secs_f64().max(0.001);
+            text += &format!(" · audio {}", format_rate((bytes - prev_bytes) as f64 * 8.0 / 1000.0 / secs));
         }
         let viewers = self.viewers_connected.get();
         if viewers > 0 {

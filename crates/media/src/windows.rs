@@ -42,12 +42,14 @@ pub fn list_sources() -> Vec<Source> {
             height,
             primary: Some(monitor.as_raw_hmonitor()) == primary,
             minimized: false,
+            process_id: None,
         });
     }
 
     let own_pid = std::process::id();
     for window in Window::enumerate().unwrap_or_default() {
-        if window.process_id().ok() == Some(own_pid) || is_cloaked(&window) {
+        let process_id = window.process_id().ok();
+        if process_id == Some(own_pid) || is_cloaked(&window) {
             continue;
         }
         let Ok(title) = window.title() else { continue };
@@ -75,6 +77,7 @@ pub fn list_sources() -> Vec<Source> {
             height,
             primary: false,
             minimized,
+            process_id,
         });
     }
     sources

@@ -1,11 +1,12 @@
 //! End-to-end: real signaling server, two client sessions, their `Links`,
 //! and WebRTC over 127.0.0.1. Covers the routing the UI layer relies on:
-//! watch -> watch request -> offer/answer/candidates -> video -> unwatch.
+//! watch -> watch request -> offer/answer/candidates -> video + audio -> unwatch.
 
 use std::time::Duration;
 
 use bytes::Bytes;
 use niscord_media::RgbaImage;
+use niscord_media::audio::{DEFAULT_BITRATE, FRAME_LEN, OpusEncoder};
 use niscord_media::video::{EncoderSettings, VideoEncoder};
 use niscord_protocol::{ServerMsg, ShareKind};
 use tokio::sync::mpsc;
@@ -102,24 +103,28 @@ async fn watch_stream_through_server() {
     // Ana goes live; Bia watches.
     ana.session.send(ClientMsg::ShareStart { kind: ShareKind::Screen, title: "Screen 1".into(), audio: false });
     tokio::time::sleep(Duration::from_millis(100)).await;
-    bia.links.watch(ana.id).unwrap();
+    // Muted: the test plays (silent) audio on the default output device.
+    bia.links.watch(ana.id, 0.0).unwrap();
     bia.session.send(ClientMsg::Watch { target: ana.id });
 
     next_event(&mut ana.events, |e| matches!(e, LinkEvent::ViewersConnected(1))).await;
 
-    // Ana streams ~2 s of video through her Links.
+    // Ana streams ~2 s of video and audio through her Links.
+    let mut opus = OpusEncoder::new(DEFAULT_BITRATE).unwrap();
     let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 1_000_000 }).unwrap();
     let sent = 60;
     for t in 0..sent {
         if let Some(frame) = encoder.encode(&picture(t), t as u64 * 33).unwrap() {
             ana.links.send_frame(Bytes::from(frame.data), Duration::from_millis(33));
         }
+        ana.links.send_audio(Bytes::from(opus.encode(&[0.0; FRAME_LEN]).unwrap()));
         tokio::time::sleep(Duration::from_millis(33)).await;
     }
 
     // Bia's decoder thread hands out pictures.
     let mut frames = 0;
     let mut connected = false;
+    let mut audio = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while let Ok(Some(event)) = tokio::time::timeout_at(deadline, bia.events.recv()).await {
         match event {
@@ -132,10 +137,16 @@ async fn watch_stream_through_server() {
                 }
             }
             LinkEvent::StreamState { state: PeerState::Connected, .. } => connected = true,
+            LinkEvent::StreamAudio { sharer, ok } => {
+                assert_eq!(sharer, ana.id);
+                audio = Some(ok);
+            }
             _ => {}
         }
     }
-    println!("Bia decoded {frames}/{sent} frames");
+    println!("Bia decoded {frames}/{sent} frames, audio playback {audio:?}");
+    // `ok` depends on the machine having an output device; arriving is what counts.
+    assert!(audio.is_some(), "Bia never got audio");
     assert!(connected, "Bia never saw the connection come up");
     assert_eq!(frames, sent);
     let counters = bia.links.stream_counters(ana.id).expect("stream counters");

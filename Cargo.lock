@@ -3242,6 +3242,8 @@ dependencies = [
  "openh264-sys2",
  "thiserror 2.0.21",
  "tracing",
+ "unsafe-libopus",
+ "wasapi",
  "windows",
  "windows-capture",
 ]
@@ -3339,6 +3341,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-complex"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
+dependencies = [
  "num-traits",
 ]
 
@@ -5971,6 +5982,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "unsafe-libopus"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c757408e7256c910343c7b215c8c8b878948630eecc774baabcca0972376eb73"
+dependencies = [
+ "arrayref",
+ "num-complex",
+ "num-traits",
+]
+
+[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6083,6 +6105,19 @@ checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
 dependencies = [
  "same-file",
  "winapi-util",
+]
+
+[[package]]
+name = "wasapi"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5225a7c681bdaf6a63aa0ffc287adba7fd5a04b592a2730643869ce45641da99"
+dependencies = [
+ "log",
+ "num-integer",
+ "thiserror 2.0.21",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

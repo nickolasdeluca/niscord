@@ -279,6 +279,8 @@ fn main() -> anyhow::Result<()> {
     });
     ui.on_close_stream(|key| with_app(|app| app.close_stream(&key)));
     ui.on_retry_stream(|key| with_app(|app| app.retry_stream(&key)));
+    ui.on_set_volume(|key, volume| with_app(|app| app.set_stream_volume(&key, volume)));
+    ui.on_toggle_mute(|key| with_app(|app| app.toggle_stream_mute(&key)));
     ui.on_share(|| with_app(|app| app.open_picker()));
     ui.on_picker_cancel(|| with_app(|app| app.close_picker()));
     ui.on_picker_choose(|key| with_app(|app| app.choose_source(key)));

@@ -226,6 +226,11 @@ impl Drop for VideoSender {
     }
 }
 
+/// Windows only delivers frames when the source changes. While it is idle,
+/// re-encode the last picture this often, so a viewer who joins (or lost
+/// packets) gets a picture without waiting for something to move.
+const REPEAT_INTERVAL: Duration = Duration::from_millis(500);
+
 fn encode_loop(
     mut encoder: VideoEncoder,
     frames: mpsc::Receiver<(Instant, RgbaImage)>,
@@ -234,10 +239,15 @@ fn encode_loop(
     counters: &Counters,
 ) {
     let start = Instant::now();
+    let mut last: Option<(Instant, RgbaImage)> = None;
+    let mut keyframe_pending = false;
     loop {
         for msg in control.try_iter() {
             match msg {
-                Control::Keyframe => encoder.request_keyframe(),
+                Control::Keyframe => {
+                    encoder.request_keyframe();
+                    keyframe_pending = true;
+                }
                 Control::Bitrate(bps) => {
                     if let Err(err) = encoder.set_bitrate(bps) {
                         tracing::warn!("{err}");
@@ -246,15 +256,25 @@ fn encode_loop(
                 Control::SourceClosed => sink.source_closed(),
             }
         }
-        let (captured_at, image) = match frames.recv_timeout(Duration::from_millis(50)) {
+        let wait = if keyframe_pending { Duration::from_millis(20) } else { Duration::from_millis(50) };
+        let (captured_at, image) = match frames.recv_timeout(wait) {
             Ok(frame) => frame,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => match last.take() {
+                // Nothing new: repeat the last picture if someone is waiting
+                // for a keyframe, or it has been a while.
+                Some((at, image)) if keyframe_pending || at.elapsed() >= REPEAT_INTERVAL => (Instant::now(), image),
+                other => {
+                    last = other;
+                    continue;
+                }
+            },
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
         let began = Instant::now();
         let timestamp_ms = captured_at.saturating_duration_since(start).as_millis() as u64;
         match encoder.encode(&image, timestamp_ms) {
             Ok(Some(frame)) => {
+                keyframe_pending &= !frame.keyframe;
                 counters.record(frame.data.len(), began.elapsed(), None, frame.width, frame.height);
                 sink.encoded(&frame, captured_at);
             }
@@ -263,6 +283,7 @@ fn encode_loop(
             }
             Err(err) => tracing::warn!("encode failed: {err}"),
         }
+        last = Some((captured_at, image));
     }
 }
 
@@ -356,6 +377,46 @@ fn decode_loop(
 mod tests {
     use super::*;
     use crate::video::{EncoderSettings, VideoEncoder};
+
+    struct Collect(mpsc::Sender<(bool, Instant)>);
+
+    impl EncodedSink for Collect {
+        fn encoded(&mut self, frame: &EncodedFrame, _captured_at: Instant) {
+            let _ = self.0.send((frame.keyframe, Instant::now()));
+        }
+        fn source_closed(&mut self) {}
+    }
+
+    #[test]
+    fn idle_source_still_answers_keyframe_requests() {
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let (control_tx, control_rx) = mpsc::channel();
+        let (out_tx, out) = mpsc::channel();
+        let encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 1_000_000 }).unwrap();
+        let thread = std::thread::spawn(move || {
+            encode_loop(encoder, frame_rx, control_rx, Collect(out_tx), &Counters::default());
+        });
+
+        // One picture, then the source goes quiet (a static window).
+        let pixels = (0..64 * 48).flat_map(|i| [i as u8, 0, 0, 255]).collect();
+        frame_tx.send((Instant::now(), RgbaImage { width: 64, height: 48, pixels })).unwrap();
+        let (first_is_key, _) = out.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(first_is_key);
+
+        // A viewer joins and asks for a keyframe: it comes from the last picture.
+        let asked = Instant::now();
+        control_tx.send(Control::Keyframe).unwrap();
+        let (keyframe, at) = out.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(keyframe, "repeat answers the request");
+        assert!(at - asked < Duration::from_millis(200), "answered after {:?}", at - asked);
+
+        // And the picture keeps being refreshed while idle.
+        let (_, refreshed) = out.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(refreshed - at >= REPEAT_INTERVAL - Duration::from_millis(20));
+
+        drop(frame_tx);
+        thread.join().unwrap();
+    }
 
     #[test]
     fn receiver_decodes_on_its_own_thread_and_counts() {

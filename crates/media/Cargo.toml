@@ -11,9 +11,12 @@ openh264 = "0.9"
 # Same version openh264 uses; only for option constants it doesn't re-export.
 openh264-sys2 = "0.9"
 thiserror = "2"
+# libopus transpiled to Rust: no C toolchain or CMake needed to build.
+unsafe-libopus = "0.2"
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+wasapi = "0.25"
 windows-capture = "2"
 # Same version windows-capture uses, so only one copy gets built.
 windows = { version = "0.62", features = [

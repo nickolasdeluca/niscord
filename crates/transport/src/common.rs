@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MediaEngine};
+use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS, MediaEngine};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::{RTCIceCandidate, RTCIceCandidateInit, RTCIceServer};
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
@@ -33,9 +33,26 @@ pub fn video_codec() -> RTCRtpCodecParameters {
     }
 }
 
+pub const OPUS_PAYLOAD_TYPE: u8 = 111;
+
+/// Opus, 48 kHz stereo, with in-band FEC (what browsers use too).
+pub fn audio_codec() -> RTCRtpCodecParameters {
+    RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: MIME_TYPE_OPUS.to_owned(),
+            clock_rate: 48_000,
+            channels: 2,
+            sdp_fmtp_line: "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1".to_owned(),
+            rtcp_feedback: vec![],
+        },
+        payload_type: OPUS_PAYLOAD_TYPE,
+    }
+}
+
 pub fn media_engine() -> Result<MediaEngine> {
     let mut engine = MediaEngine::default();
     engine.register_codec(video_codec(), RtpCodecKind::Video)?;
+    engine.register_codec(audio_codec(), RtpCodecKind::Audio)?;
     Ok(engine)
 }
 

@@ -9,7 +9,7 @@ use slint::Model;
 
 use crate::links::{LinkEvent, Links};
 use crate::tiles::{FrameMailbox, SELF_KEY, format_rate, new_tile};
-use crate::{App, with_app};
+use crate::{App, StreamTile, with_app};
 
 impl App {
     /// Create the connection manager for a new server session.
@@ -41,7 +41,7 @@ impl App {
             return;
         }
         let Some(links) = self.links() else { return };
-        if let Err(err) = links.watch(target) {
+        if let Err(err) = links.watch(target, 1.0) {
             self.show_notice(format!("Couldn't open the stream: {err}"));
             return;
         }
@@ -61,7 +61,8 @@ impl App {
     /// Reconnect to a stream whose connection failed.
     pub fn retry_watch(&self, target: PeerId) {
         let Some(links) = self.links() else { return };
-        if let Err(err) = links.watch(target) {
+        let volume = self.tile(&target.to_string()).map_or(1.0, |tile| effective_volume(&tile));
+        if let Err(err) = links.watch(target, volume) {
             self.show_notice(format!("Couldn't open the stream: {err}"));
             return;
         }
@@ -88,6 +89,22 @@ impl App {
         }
     }
 
+    pub fn set_stream_volume(&self, key: &str, volume: f32) {
+        self.update_tile(key, |tile| tile.volume = volume);
+        self.apply_volume(key);
+    }
+
+    pub fn toggle_stream_mute(&self, key: &str) {
+        self.update_tile(key, |tile| tile.muted = !tile.muted);
+        self.apply_volume(key);
+    }
+
+    fn apply_volume(&self, key: &str) {
+        if let (Some(links), Some(tile), Ok(sharer)) = (self.links(), self.tile(key), key.parse()) {
+            links.set_volume(sharer, effective_volume(&tile));
+        }
+    }
+
     fn on_link_event(&self, event: LinkEvent) {
         match event {
             LinkEvent::StreamState { sharer, state } => {
@@ -110,6 +127,12 @@ impl App {
                     }
                     PeerState::Closed => {}
                 });
+            }
+            LinkEvent::StreamAudio { sharer, ok: true } => {
+                self.update_tile(&sharer.to_string(), |t| t.has_audio = true)
+            }
+            LinkEvent::StreamAudio { sharer, ok: false } => {
+                self.show_notice(format!("Can't play {}'s audio: no sound output device", self.peer_name(sharer)));
             }
             LinkEvent::ViewersConnected(count) => self.viewers_connected.set(count),
             LinkEvent::StreamFrame { .. } => unreachable!("frames go through the mailbox"),
@@ -165,4 +188,9 @@ impl App {
             self.update_tile(&key, |tile| tile.stats = text.into());
         }
     }
+}
+
+/// What the player should use: the slider's volume unless muted.
+fn effective_volume(tile: &StreamTile) -> f32 {
+    if tile.muted { 0.0 } else { tile.volume }
 }

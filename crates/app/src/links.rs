@@ -2,20 +2,24 @@
 //!
 //! * As a sharer: one [`OutgoingPeer`] per viewer. Encoded frames fan out to
 //!   all of them; their keyframe requests and bandwidth estimates steer the
-//!   single encoder (the bitrate follows the slowest viewer).
+//!   single encoder (the bitrate follows the slowest viewer). Opus packets
+//!   fan out the same way, on their own queue so audio never waits on video.
 //! * As a viewer: one [`IncomingPeer`] per stream being watched, each with its
-//!   own decoder thread.
+//!   own decoder thread, and an audio player once the stream's audio arrives.
 //!
 //! Each connection is an actor task with a mailbox, so signaling messages for
 //! one peer are applied strictly in the order the server relayed them.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use niscord_media::RgbaImage;
+use niscord_media::audio::FRAME_DURATION;
 use niscord_media::pipeline::{Counters, SenderControl, VideoReceiver};
+use niscord_media::windows_audio::AudioReceiver;
 use niscord_protocol::{ClientMsg, IceServer, PeerId, Role, SignalData};
 use niscord_transport::{
     BitrateLimits, IncomingEvents, IncomingPeer, OutgoingEvents, OutgoingPeer, PeerEvents, PeerState, TransportConfig,
@@ -40,6 +44,8 @@ pub enum LinkEvent {
     StreamState { sharer: PeerId, state: PeerState },
     /// A decoded picture from a stream we watch.
     StreamFrame { sharer: PeerId, image: RgbaImage },
+    /// A stream we watch started playing audio (or couldn't: `ok` false).
+    StreamAudio { sharer: PeerId, ok: bool },
     /// How many viewers are connected to our stream right now.
     ViewersConnected(usize),
 }
@@ -68,11 +74,14 @@ pub struct Links {
     incoming: Mutex<HashMap<PeerId, Incoming>>,
     encoder: Mutex<Option<Encoder>>,
     frames: mpsc::UnboundedSender<(Bytes, Duration)>,
+    audio: mpsc::UnboundedSender<Bytes>,
 }
 
 struct Incoming {
     mailbox: mpsc::UnboundedSender<Cmd>,
     counters: Arc<Counters>,
+    /// Playback volume (f32 bits), read by the audio callback.
+    volume: Arc<AtomicU32>,
 }
 
 impl Links {
@@ -82,6 +91,7 @@ impl Links {
         ui: impl Fn(LinkEvent) + Send + Sync + 'static,
     ) -> Arc<Self> {
         let (frames, frames_rx) = mpsc::unbounded_channel();
+        let (audio, audio_rx) = mpsc::unbounded_channel();
         let links = Arc::new(Self {
             rt: rt.clone(),
             signaling,
@@ -96,8 +106,10 @@ impl Links {
             incoming: Mutex::default(),
             encoder: Mutex::default(),
             frames,
+            audio,
         });
         rt.spawn(fan_out(Arc::downgrade(&links), frames_rx));
+        rt.spawn(fan_out_audio(Arc::downgrade(&links), audio_rx));
         rt.spawn(steer_bitrate(Arc::downgrade(&links)));
         links
     }
@@ -130,6 +142,11 @@ impl Links {
     /// Queue an encoded frame for every connected viewer.
     pub fn send_frame(&self, data: Bytes, duration: Duration) {
         let _ = self.frames.send((data, duration));
+    }
+
+    /// Queue an Opus packet for every connected viewer.
+    pub fn send_audio(&self, packet: Bytes) {
+        let _ = self.audio.send(packet);
     }
 
     fn request_keyframe(&self) {
@@ -173,7 +190,7 @@ impl Links {
 
     /// Start receiving `sharer`'s stream; the connection comes up when its
     /// offer arrives. `on_frame` runs on a decoder thread.
-    pub fn watch(self: &Arc<Self>, sharer: PeerId) -> anyhow::Result<()> {
+    pub fn watch(self: &Arc<Self>, sharer: PeerId, volume: f32) -> anyhow::Result<()> {
         self.unwatch(sharer);
         let links = Arc::downgrade(self);
         let receiver = Arc::new(VideoReceiver::start(move |image| {
@@ -182,9 +199,18 @@ impl Links {
             }
         })?);
         let (tx, rx) = mpsc::unbounded_channel();
-        self.incoming.lock().unwrap().insert(sharer, Incoming { mailbox: tx, counters: receiver.counters() });
-        self.rt.spawn(run_incoming(Arc::downgrade(self), sharer, receiver, rx));
+        let volume = Arc::new(AtomicU32::new(volume.to_bits()));
+        let incoming = Incoming { mailbox: tx, counters: receiver.counters(), volume: volume.clone() };
+        self.incoming.lock().unwrap().insert(sharer, incoming);
+        self.rt.spawn(run_incoming(Arc::downgrade(self), sharer, receiver, volume, rx));
         Ok(())
+    }
+
+    /// Playback volume for a stream we watch: 0 mutes, 1 is as sent.
+    pub fn set_volume(&self, sharer: PeerId, volume: f32) {
+        if let Some(incoming) = self.incoming.lock().unwrap().get(&sharer) {
+            incoming.volume.store(volume.to_bits(), Ordering::Relaxed);
+        }
     }
 
     pub fn unwatch(&self, sharer: PeerId) {
@@ -263,7 +289,9 @@ impl OutgoingEvents for ToViewer {
 async fn run_outgoing(links: Weak<Links>, viewer: PeerId, limits: BitrateLimits, mut rx: mpsc::UnboundedReceiver<Cmd>) {
     let Some(config) = links.upgrade().map(|l| l.config.lock().unwrap().clone()) else { return };
     let events = Arc::new(ToViewer { links: links.clone(), viewer });
-    let peer = match OutgoingPeer::start(&config, limits, events).await {
+    // Always offer an audio track: it costs nothing while silent, and lets
+    // audio come and go with source switches without renegotiating.
+    let peer = match OutgoingPeer::start(&config, limits, true, events).await {
         Ok(peer) => Arc::new(peer),
         Err(err) => {
             tracing::warn!(%viewer, "could not start connection to viewer: {err:#}");
@@ -293,6 +321,19 @@ struct FromSharer {
     links: Weak<Links>,
     sharer: PeerId,
     receiver: Arc<VideoReceiver>,
+    volume: Arc<AtomicU32>,
+    audio: Mutex<Audio>,
+}
+
+/// Audio playback for one watched stream, started by its first packet.
+enum Audio {
+    Idle,
+    Playing {
+        receiver: AudioReceiver,
+        volume: u32,
+    },
+    /// No output device, or the stream is closing.
+    Off,
 }
 
 impl PeerEvents for FromSharer {
@@ -314,16 +355,48 @@ impl IncomingEvents for FromSharer {
     fn frame(&self, data: Bytes, keyframe: bool) {
         self.receiver.push(data.to_vec(), keyframe, None);
     }
+
+    fn audio(&self, packet: Bytes, lost: usize) {
+        let mut audio = self.audio.lock().unwrap();
+        if let Audio::Idle = *audio {
+            let started = AudioReceiver::start();
+            if let Err(err) = &started {
+                tracing::warn!(sharer = %self.sharer, "can't play stream audio: {err}");
+            }
+            if let Some(links) = self.links.upgrade() {
+                (links.ui)(LinkEvent::StreamAudio { sharer: self.sharer, ok: started.is_ok() });
+            }
+            *audio = match started {
+                Ok(receiver) => Audio::Playing { receiver, volume: 1.0f32.to_bits() },
+                Err(_) => Audio::Off,
+            };
+        }
+        if let Audio::Playing { receiver, volume } = &mut *audio {
+            let wanted = self.volume.load(Ordering::Relaxed);
+            if *volume != wanted {
+                *volume = wanted;
+                receiver.set_volume(f32::from_bits(wanted));
+            }
+            receiver.push(&packet, lost);
+        }
+    }
 }
 
 async fn run_incoming(
     links: Weak<Links>,
     sharer: PeerId,
     receiver: Arc<VideoReceiver>,
+    volume: Arc<AtomicU32>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
 ) {
     let Some(config) = links.upgrade().map(|l| l.config.lock().unwrap().clone()) else { return };
-    let events = Arc::new(FromSharer { links: links.clone(), sharer, receiver: receiver.clone() });
+    let events = Arc::new(FromSharer {
+        links: links.clone(),
+        sharer,
+        receiver: receiver.clone(),
+        volume,
+        audio: Mutex::new(Audio::Idle),
+    });
     let peer = match IncomingPeer::start(&config, events.clone()).await {
         Ok(peer) => peer,
         Err(err) => {
@@ -338,9 +411,11 @@ async fn run_incoming(
         }
     }
     peer.close().await;
-    // Joining the decoder thread can block briefly; keep it off the runtime.
+    // Joining the decoder and audio threads can block briefly; keep it off
+    // the runtime. `Off` also stops a late packet from restarting playback.
+    let audio = std::mem::replace(&mut *events.audio.lock().unwrap(), Audio::Off);
     drop(events);
-    let _ = tokio::task::spawn_blocking(move || drop(receiver)).await;
+    let _ = tokio::task::spawn_blocking(move || drop((receiver, audio))).await;
 }
 
 /// Sends every encoded frame to every connected viewer.
@@ -352,6 +427,20 @@ async fn fan_out(links: Weak<Links>, mut frames: mpsc::UnboundedReceiver<(Bytes,
         for peer in peers {
             if let Err(err) = peer.send_frame(data.clone(), duration).await {
                 tracing::debug!("sending frame failed: {err:#}");
+            }
+        }
+    }
+}
+
+/// Sends every Opus packet to every connected viewer.
+async fn fan_out_audio(links: Weak<Links>, mut packets: mpsc::UnboundedReceiver<Bytes>) {
+    while let Some(packet) = packets.recv().await {
+        let Some(peers) = links.upgrade().map(|l| l.ready.lock().unwrap().values().cloned().collect::<Vec<_>>()) else {
+            return;
+        };
+        for peer in peers {
+            if let Err(err) = peer.send_audio(packet.clone(), FRAME_DURATION).await {
+                tracing::debug!("sending audio failed: {err:#}");
             }
         }
     }
