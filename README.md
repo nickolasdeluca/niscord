@@ -14,8 +14,8 @@ NAT), media is relayed through a TURN server you also host.
 | Milestone | State |
 |---|---|
 | 1. Workspace, signaling server, app with connect screen and online list | ✅ done |
-| 2. Screen/window picker with live thumbnails (Windows Graphics Capture) | ⏳ next |
-| 3. Local capture → encode → decode → display loop | |
+| 2. Screen/window picker with live thumbnails, local preview of your share | ✅ done |
+| 3. Local capture → encode → decode → display loop | ⏳ next |
 | 4. WebRTC transport between peers (Watch actually shows video) | |
 | 5. Audio: system-wide or per-app loopback, Opus | |
 | 6. Quality: hardware encoding, bitrate adaptation, keyframe recovery | |
@@ -26,6 +26,7 @@ NAT), media is relayed through a TURN server you also host.
 ```
 crates/
   protocol/   JSON messages shared by app and server
+  media/      screen/window capture (Windows Graphics Capture)
   server/     signaling server (presence, watch requests, WebRTC signaling relay)
   app/        the Slint desktop app (`niscord.exe`)
 ```
@@ -45,6 +46,15 @@ To test with one machine, run a fake friend who appears to be sharing:
 ```sh
 cargo run -p niscord-server --example fake_peer -- ws://127.0.0.1:8080 "Bia" [password]
 ```
+
+To list capture sources and time a thumbnail grab of each:
+
+```sh
+cargo run -p niscord-media --example probe
+```
+
+Screen capture needs Windows 10 version 1903 or later. On Windows 10, Windows draws a
+yellow border around whatever is being captured; on Windows 11 Niscord hides it.
 
 ## Running the server
 

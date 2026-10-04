@@ -1,4 +1,7 @@
 import { AboutSlint, Button, LineEdit, ListView, Palette } from "std-widgets.slint";
+import { SharePicker, SourceItem } from "picker.slint";
+
+export { SourceItem }
 
 export struct PeerItem {
     id: string,
@@ -193,9 +196,13 @@ component MainScreen inherits Rectangle {
     in property <string> my-name;
     in property <bool> online;
     in property <string> status-text;
+    in property <bool> sharing;
+    in property <string> share-title;
+    in property <image> preview;
     callback watch(string);
     callback unwatch(string);
     callback share();
+    callback stop-share();
     callback disconnect();
     callback about();
 
@@ -251,11 +258,17 @@ component MainScreen inherits Rectangle {
                         HorizontalLayout {
                             spacing: 6px;
                             Button {
-                                text: "Share screen";
-                                primary: true;
+                                text: root.sharing ? "Stop sharing" : "Share screen";
+                                primary: !root.sharing;
                                 horizontal-stretch: 1;
-                                enabled: root.online;
-                                clicked => { root.share(); }
+                                enabled: root.online || root.sharing;
+                                clicked => {
+                                    if root.sharing {
+                                        root.stop-share();
+                                    } else {
+                                        root.share();
+                                    }
+                                }
                             }
                             Button {
                                 text: "Leave";
@@ -271,8 +284,60 @@ component MainScreen inherits Rectangle {
             }
         }
 
-        // Stage: streams being watched.
-        Rectangle {
+        // Stage: your own stream preview and streams being watched.
+        if root.sharing: Rectangle {
+            horizontal-stretch: 1;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: black;
+                    border-radius: 8px;
+                    clip: true;
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: root.preview;
+                        image-fit: contain;
+                    }
+                    Rectangle {
+                        x: 10px;
+                        y: 10px;
+                        width: caption.preferred-width;
+                        height: caption.preferred-height;
+                        background: #000000a0;
+                        border-radius: 6px;
+                        caption := HorizontalLayout {
+                            padding: 6px;
+                            spacing: 6px;
+                            LiveBadge { }
+                            Text {
+                                text: "You · " + root.share-title;
+                                color: white;
+                                font-weight: 600;
+                                max-width: 400px;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    Button {
+                        text: "Change source";
+                        enabled: root.online;
+                        clicked => { root.share(); }
+                    }
+                    Button {
+                        text: "Stop sharing";
+                        clicked => { root.stop-share(); }
+                    }
+                }
+            }
+        }
+        if !root.sharing: Rectangle {
             horizontal-stretch: 1;
             VerticalLayout {
                 alignment: center;
@@ -315,11 +380,24 @@ export component AppWindow inherits Window {
     in property <[PeerItem]> peers;
     in property <string> notice;
 
+    // Sharing.
+    in property <bool> sharing;
+    in property <string> share-title;
+    in property <image> preview;
+    in property <bool> picker-open;
+    in property <[SourceItem]> picker-windows;
+    in property <[SourceItem]> picker-screens;
+    in-out property <int> picker-selected: -1;
+
     callback connect();
     callback disconnect();
     callback watch(string);
     callback unwatch(string);
+    // Open the source picker.
     callback share();
+    callback stop-share();
+    callback picker-cancel();
+    callback picker-choose(int);
 
     about-popup := PopupWindow {
         x: (root.width - 360px) / 2;
@@ -362,11 +440,24 @@ export component AppWindow inherits Window {
         my-name: root.my-name;
         online: root.online;
         status-text: root.status-text;
+        sharing: root.sharing;
+        share-title: root.share-title;
+        preview: root.preview;
         watch(id) => { root.watch(id); }
         unwatch(id) => { root.unwatch(id); }
         share => { root.share(); }
+        stop-share => { root.stop-share(); }
         disconnect => { root.disconnect(); }
         about => { about-popup.show(); }
+    }
+
+    if root.connected && root.picker-open: SharePicker {
+        windows: root.picker-windows;
+        screens: root.picker-screens;
+        sharing: root.sharing;
+        selected <=> root.picker-selected;
+        cancel => { root.picker-cancel(); }
+        choose(key) => { root.picker-choose(key); }
     }
 
     // Transient message banner (e.g. "coming soon", "stream ended").

@@ -1,0 +1,189 @@
+import { Button, Palette, ScrollView } from "std-widgets.slint";
+
+export struct SourceItem {
+    // Index into the Rust-side source list; unique across both tabs.
+    key: int,
+    title: string,
+    detail: string,
+    is-screen: bool,
+    primary: bool,
+    minimized: bool,
+    has-thumbnail: bool,
+    thumbnail: image,
+}
+
+component SourceTile inherits Rectangle {
+    in property <SourceItem> item;
+    in property <bool> selected;
+    callback clicked();
+    callback activated();
+
+    width: 220px;
+    height: 172px;
+    border-radius: 8px;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? Palette.accent-background : Palette.border;
+    background: root.selected ? Palette.accent-background.transparentize(0.8)
+        : touch.has-hover ? Palette.alternate-background.brighter(0.2) : Palette.alternate-background;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 4px;
+        Rectangle {
+            height: 112px;
+            background: #00000066;
+            border-radius: 4px;
+            clip: true;
+            if root.item.has-thumbnail: Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.item.thumbnail;
+                image-fit: contain;
+            }
+            if !root.item.has-thumbnail: Text {
+                text: root.item.minimized ? "Minimized" : "Loading…";
+                color: Palette.foreground.transparentize(0.5);
+            }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: root.item.title;
+                font-weight: 600;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            if root.item.primary: Text {
+                text: "Main";
+                font-size: 11px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+        }
+        Text {
+            text: root.item.detail;
+            font-size: 11px;
+            color: Palette.foreground.transparentize(0.4);
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.activated(); }
+    }
+}
+
+// Tiles flowing left-to-right, wrapping to as many columns as fit.
+component SourceGrid inherits ScrollView {
+    in property <[SourceItem]> items;
+    in-out property <int> selected;
+    in property <string> empty-text;
+    callback activated(int);
+
+    property <length> tile-w: 220px;
+    property <length> tile-h: 172px;
+    property <length> gap: 12px;
+    property <int> cols: max(1, floor((self.visible-width + self.gap) / (self.tile-w + self.gap)));
+    // Center the block of tiles horizontally.
+    property <length> left: max(0px, (self.visible-width - (self.cols * (self.tile-w + self.gap) - self.gap)) / 2);
+
+    content-height: ceil(self.items.length / self.cols) * (self.tile-h + self.gap);
+
+    for item[i] in root.items: SourceTile {
+        x: root.left + mod(i, root.cols) * (root.tile-w + root.gap);
+        y: floor(i / root.cols) * (root.tile-h + root.gap);
+        item: item;
+        selected: item.key == root.selected;
+        clicked => { root.selected = item.key; }
+        activated => { root.activated(item.key); }
+    }
+
+    if root.items.length == 0: Text {
+        y: 40px;
+        width: root.visible-width;
+        horizontal-alignment: center;
+        text: root.empty-text;
+        color: Palette.foreground.transparentize(0.5);
+    }
+}
+
+// Modal "choose what to share" dialog, Discord style.
+export component SharePicker inherits Rectangle {
+    in property <[SourceItem]> windows;
+    in property <[SourceItem]> screens;
+    in property <bool> sharing;
+    in-out property <int> selected: -1;
+    callback cancel();
+    callback choose(int);
+
+    property <int> tab: 0;
+
+    background: #000000a0;
+    // Swallow clicks so nothing behind the dialog reacts.
+    TouchArea {
+        clicked => { root.cancel(); }
+    }
+
+    dialog := Rectangle {
+        width: min(root.width - 48px, 940px);
+        height: min(root.height - 48px, 640px);
+        background: Palette.background;
+        border-radius: 12px;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000099;
+        // Clicks inside the dialog must not close it.
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+            Text {
+                text: root.sharing ? "Switch what you're sharing" : "Choose what to share";
+                font-size: 18px;
+                font-weight: 700;
+            }
+            HorizontalLayout {
+                alignment: start;
+                spacing: 6px;
+                Button {
+                    text: "Applications (" + root.windows.length + ")";
+                    primary: root.tab == 0;
+                    clicked => { root.tab = 0; }
+                }
+                Button {
+                    text: "Screens (" + root.screens.length + ")";
+                    primary: root.tab == 1;
+                    clicked => { root.tab = 1; }
+                }
+            }
+            if root.tab == 0: SourceGrid {
+                vertical-stretch: 1;
+                items: root.windows;
+                selected <=> root.selected;
+                empty-text: "No windows to share.";
+                activated(key) => { root.choose(key); }
+            }
+            if root.tab == 1: SourceGrid {
+                vertical-stretch: 1;
+                items: root.screens;
+                selected <=> root.selected;
+                empty-text: "No screens found.";
+                activated(key) => { root.choose(key); }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                Button {
+                    text: root.sharing ? "Switch" : "Go Live";
+                    primary: true;
+                    enabled: root.selected >= 0;
+                    clicked => { root.choose(root.selected); }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "niscord-media"
+description = "Screen capture and media pipeline for Niscord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror = "2"
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2"
+# Same version windows-capture uses, so only one copy gets built.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+] }

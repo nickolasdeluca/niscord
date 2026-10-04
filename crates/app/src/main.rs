@@ -3,6 +3,8 @@
 
 mod net;
 mod settings;
+mod share;
+mod thumbnails;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -27,6 +29,12 @@ struct App {
     my_id: Cell<Option<PeerId>>,
     peers: Rc<VecModel<PeerItem>>,
     notice_timer: slint::Timer,
+    picker: RefCell<Option<share::Picker>>,
+    /// Bumped whenever the picker opens or closes, to drop stale thumbnails.
+    picker_generation: Cell<u64>,
+    share: RefCell<Option<share::ActiveShare>>,
+    /// Bumped whenever sharing starts or stops, to drop stale frames.
+    share_generation: Cell<u64>,
 }
 
 thread_local! {
@@ -80,6 +88,8 @@ impl App {
     }
 
     fn disconnect(&self, error: Option<String>) {
+        self.close_picker();
+        self.stop_share(None);
         self.generation.set(self.generation.get() + 1);
         self.session.borrow_mut().take();
         self.my_id.set(None);
@@ -120,6 +130,8 @@ impl App {
                 ui.set_connected(true);
                 ui.set_online(true);
                 ui.set_status_text("Connected".into());
+                // After a reconnect the server has forgotten our share.
+                self.announce_share();
             }
             net::Event::Peers(peers) => self.set_peers(peers),
             net::Event::Reconnecting(reason) => {
@@ -209,6 +221,10 @@ fn main() -> anyhow::Result<()> {
         my_id: Cell::new(None),
         peers,
         notice_timer: slint::Timer::default(),
+        picker: RefCell::new(None),
+        picker_generation: Cell::new(0),
+        share: RefCell::new(None),
+        share_generation: Cell::new(0),
     });
     APP.with(|a| *a.borrow_mut() = Some(app));
 
@@ -229,13 +245,18 @@ fn main() -> anyhow::Result<()> {
             }
         })
     });
-    ui.on_share(|| with_app(|app| app.show_notice("Screen sharing is coming in the next milestone")));
+    ui.on_share(|| with_app(|app| app.open_picker()));
+    ui.on_picker_cancel(|| with_app(|app| app.close_picker()));
+    ui.on_picker_choose(|key| with_app(|app| app.choose_source(key)));
+    ui.on_stop_share(|| with_app(|app| app.stop_share(None)));
 
     ui.run()?;
 
     // Tear down the network before the runtime goes away.
     APP.with(|a| {
         if let Some(app) = a.borrow_mut().take() {
+            app.picker.borrow_mut().take();
+            app.share.borrow_mut().take();
             app.session.borrow_mut().take();
         }
     });
