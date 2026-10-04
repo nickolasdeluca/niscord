@@ -1,8 +1,9 @@
-//! H.264 encoding and decoding (OpenH264, software).
+//! H.264 encoding and decoding.
 //!
-//! H.264 Constrained Baseline is what every WebRTC stack can carry, which
-//! keeps the transport milestone simple. Hardware encoders can slot in behind
-//! the same interface later.
+//! Encoding uses the GPU's hardware encoder when there is one (through Media
+//! Foundation, see `mf_encoder`), and OpenH264 in software otherwise or if
+//! the hardware fails. Both produce Constrained Baseline, which OpenH264
+//! decodes on the viewer's side.
 
 use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig, Flush};
@@ -15,7 +16,7 @@ use crate::{Error, Result, RgbaImage};
 
 /// How often to send a full keyframe even when nobody asks for one, so a
 /// viewer that lost packets recovers on its own.
-const KEYFRAME_INTERVAL_SECS: u32 = 5;
+pub(crate) const KEYFRAME_INTERVAL_SECS: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderSettings {
@@ -39,9 +40,83 @@ pub struct EncodedFrame {
     pub height: u32,
 }
 
+/// Whether an Annex B access unit contains a NAL unit of this type
+/// (5 = IDR slice, 7 = SPS).
+pub(crate) fn has_nal(annex_b: &[u8], nal_type: u8) -> bool {
+    annex_b.windows(4).any(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == nal_type)
+}
+
+/// Which encoder to use. Hardware falls back to software if it's missing or
+/// fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderPreference {
+    Hardware,
+    Software,
+}
+
+impl EncoderPreference {
+    /// `NISCORD_ENCODER=software` forces OpenH264 (for comparison/debugging).
+    pub fn from_env() -> Self {
+        match std::env::var("NISCORD_ENCODER") {
+            Ok(v) if v.eq_ignore_ascii_case("software") => Self::Software,
+            _ => Self::Hardware,
+        }
+    }
+}
+
+/// A hardware encoder takes ~0.5 s to open and only works at one frame
+/// size. It is opened on a helper thread once the size has been steady this
+/// long, and software covers the frames in between (start-up, resizing).
+#[cfg(windows)]
+const STEADY_SIZE: std::time::Duration = std::time::Duration::from_millis(300);
+/// Give up on hardware after this many sizes failed to open.
+#[cfg(windows)]
+const MAX_OPEN_FAILURES: u32 = 3;
+
+#[cfg(windows)]
+enum Hardware {
+    Idle,
+    Opening { size: (u32, u32), result: std::sync::mpsc::Receiver<Result<crate::mf_encoder::MfEncoder>> },
+    Active(crate::mf_encoder::MfEncoder),
+    Unavailable,
+}
+
+#[cfg(windows)]
+impl Hardware {
+    fn start_opening(size: (u32, u32), settings: EncoderSettings) -> Self {
+        let (tx, result) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("open-encoder".into()).spawn(move || {
+            let _ = tx.send(crate::mf_encoder::MfEncoder::new(size.0, size.1, settings));
+        });
+        match spawned {
+            Ok(_) => Self::Opening { size, result },
+            Err(_) => Self::Unavailable,
+        }
+    }
+}
+
+/// Closing a hardware session can take a while too; don't make the encoder
+/// thread wait for it.
+#[cfg(windows)]
+fn close_in_background(encoder: crate::mf_encoder::MfEncoder) {
+    let _ = std::thread::Builder::new().name("close-encoder".into()).spawn(move || drop(encoder));
+}
+
 pub struct VideoEncoder {
-    encoder: Encoder,
-    yuv: Option<YUVBuffer>,
+    settings: EncoderSettings,
+    #[cfg(windows)]
+    hardware: Hardware,
+    /// Frame size and since when it hasn't changed.
+    #[cfg(windows)]
+    size: Option<((u32, u32), std::time::Instant)>,
+    #[cfg(windows)]
+    open_failures: u32,
+    /// The last size hardware wouldn't open (e.g. below its minimum).
+    #[cfg(windows)]
+    failed_size: Option<(u32, u32)>,
+    /// Which encoder made the last frame: switching needs a keyframe.
+    last_was_hardware: bool,
+    software: Option<SoftwareEncoder>,
     /// Scratch space for cropping odd-sized frames.
     even: Vec<u8>,
     force_keyframe: bool,
@@ -49,6 +124,205 @@ pub struct VideoEncoder {
 
 impl VideoEncoder {
     pub fn new(settings: EncoderSettings) -> Result<Self> {
+        Self::with_preference(settings, EncoderPreference::from_env())
+    }
+
+    pub fn with_preference(settings: EncoderSettings, preference: EncoderPreference) -> Result<Self> {
+        let software = match preference {
+            EncoderPreference::Software => Some(SoftwareEncoder::new(settings)?),
+            EncoderPreference::Hardware => None,
+        };
+        Ok(Self {
+            settings,
+            #[cfg(windows)]
+            hardware: if software.is_some() { Hardware::Unavailable } else { Hardware::Idle },
+            #[cfg(windows)]
+            size: None,
+            #[cfg(windows)]
+            open_failures: 0,
+            #[cfg(windows)]
+            failed_size: None,
+            last_was_hardware: false,
+            software,
+            even: Vec::new(),
+            force_keyframe: false,
+        })
+    }
+
+    /// Name of the encoder in use, once the first frame went through.
+    pub fn backend(&self) -> Option<&str> {
+        #[cfg(windows)]
+        if let Hardware::Active(hw) = &self.hardware {
+            return Some(hw.name());
+        }
+        self.software.as_ref().map(|_| "OpenH264")
+    }
+
+    pub fn is_hardware(&self) -> bool {
+        #[cfg(windows)]
+        if let Hardware::Active(_) = self.hardware {
+            return true;
+        }
+        false
+    }
+
+    /// Use software from now on (e.g. the hardware's output didn't decode).
+    pub fn disable_hardware(&mut self) {
+        #[cfg(windows)]
+        if let Hardware::Active(hw) = std::mem::replace(&mut self.hardware, Hardware::Unavailable) {
+            tracing::warn!(encoder = hw.name(), "hardware encoder disabled, using OpenH264");
+            close_in_background(hw);
+        }
+    }
+
+    /// Make the next frame a keyframe (a new viewer joined, or one lost data).
+    pub fn request_keyframe(&mut self) {
+        self.force_keyframe = true;
+    }
+
+    /// Change the target bitrate without restarting the stream (follows the
+    /// network's bandwidth estimate).
+    pub fn set_bitrate(&mut self, bps: u32) -> Result<()> {
+        self.settings.bitrate_bps = bps;
+        #[cfg(windows)]
+        if let Hardware::Active(hw) = &mut self.hardware {
+            return hw.set_bitrate(bps);
+        }
+        match &mut self.software {
+            Some(software) => software.set_bitrate(bps),
+            None => Ok(()),
+        }
+    }
+
+    /// Encode one frame. Returns `None` when rate control skipped it (or the
+    /// hardware will hand it out on a later call).
+    /// Frame sizes may change between calls (e.g. a resized window).
+    pub fn encode(&mut self, image: &RgbaImage, timestamp_ms: u64) -> Result<Option<EncodedFrame>> {
+        // 4:2:0 chroma needs even dimensions; drop a trailing row/column.
+        let width = image.width & !1;
+        let height = image.height & !1;
+        if width == 0 || height == 0 {
+            return Ok(None);
+        }
+        let mut even = std::mem::take(&mut self.even);
+        let pixels = if (width, height) == (image.width, image.height) {
+            &image.pixels[..]
+        } else {
+            crop(&image.pixels, image.width, width, height, &mut even);
+            &even[..]
+        };
+        let result = self.encode_even(pixels, width, height, timestamp_ms);
+        self.even = even;
+        result
+    }
+
+    fn encode_even(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        timestamp_ms: u64,
+    ) -> Result<Option<EncodedFrame>> {
+        #[cfg(windows)]
+        if let Some(result) = self.encode_hardware(pixels, width, height, timestamp_ms) {
+            self.last_was_hardware = true;
+            return result;
+        }
+
+        // Coming from hardware, the viewer's decoder has none of software's
+        // reference frames.
+        let keyframe = std::mem::take(&mut self.force_keyframe) | std::mem::take(&mut self.last_was_hardware);
+        let software = match &mut self.software {
+            Some(software) => software,
+            slot => slot.insert(SoftwareEncoder::new(self.settings)?),
+        };
+        software.encode(pixels, width, height, timestamp_ms, keyframe)
+    }
+
+    /// `None` when hardware isn't ready for this frame, so software takes it.
+    #[cfg(windows)]
+    fn encode_hardware(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        timestamp_ms: u64,
+    ) -> Option<Result<Option<EncodedFrame>>> {
+        use std::time::Instant;
+
+        let size = (width, height);
+        let steady = match self.size {
+            Some((last, since)) if last == size => since.elapsed() >= STEADY_SIZE,
+            // The very first frame: no reason to wait.
+            None => {
+                self.size = Some((size, Instant::now()));
+                true
+            }
+            Some(_) => {
+                self.size = Some((size, Instant::now()));
+                false
+            }
+        };
+
+        // A session is for one size: retire it when the frames change size.
+        match std::mem::replace(&mut self.hardware, Hardware::Idle) {
+            Hardware::Active(hw) if hw.size() != size => close_in_background(hw),
+            Hardware::Opening { size: opening, result } if opening != size => {
+                let _ = std::thread::Builder::new().spawn(move || drop(result.recv()));
+            }
+            Hardware::Opening { size: opening, result } => {
+                self.hardware = match result.try_recv() {
+                    Ok(Ok(mut hw)) => {
+                        // The bitrate may have moved while it was opening.
+                        let _ = hw.set_bitrate(self.settings.bitrate_bps);
+                        tracing::info!(encoder = hw.name(), width, height, "switched to hardware encoding");
+                        Hardware::Active(hw)
+                    }
+                    Ok(Err(err)) => {
+                        self.open_failures += 1;
+                        tracing::info!(width, height, "no hardware encoder for this size, using OpenH264: {err}");
+                        self.failed_size = Some(size);
+                        if self.open_failures >= MAX_OPEN_FAILURES { Hardware::Unavailable } else { Hardware::Idle }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => Hardware::Opening { size: opening, result },
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Hardware::Unavailable,
+                };
+            }
+            other => self.hardware = other,
+        }
+        if let Hardware::Idle = self.hardware
+            && steady
+            && self.failed_size != Some(size)
+        {
+            self.hardware = Hardware::start_opening(size, self.settings);
+        }
+
+        let Hardware::Active(hw) = &mut self.hardware else { return None };
+        // Switching from software: start the hardware stream with a keyframe
+        // (its first frame is one anyway; this covers a later switch back).
+        let keyframe = std::mem::take(&mut self.force_keyframe) | !self.last_was_hardware;
+        let fill = |nv12: &mut [u8]| crate::color::convert_into(pixels, width as usize, height as usize, nv12);
+        match hw.encode(fill, timestamp_ms, keyframe) {
+            Ok(frame) => Some(Ok(frame)),
+            Err(err) => {
+                tracing::warn!(encoder = hw.name(), "hardware encoder failed, switching to OpenH264: {err}");
+                if let Hardware::Active(hw) = std::mem::replace(&mut self.hardware, Hardware::Unavailable) {
+                    close_in_background(hw);
+                }
+                None
+            }
+        }
+    }
+}
+
+/// OpenH264, the software fallback.
+struct SoftwareEncoder {
+    encoder: Encoder,
+    yuv: Option<YUVBuffer>,
+}
+
+impl SoftwareEncoder {
+    fn new(settings: EncoderSettings) -> Result<Self> {
         let config = EncoderConfig::new()
             // Despite the name, the camera mode suits screen sharing better
             // here: OpenH264's screen-content rate control largely ignores
@@ -65,17 +339,10 @@ impl VideoEncoder {
             .skip_frames(true)
             .intra_frame_period(IntraFramePeriod::from_num_frames(settings.fps * KEYFRAME_INTERVAL_SECS));
         let encoder = Encoder::with_api_config(OpenH264API::from_source(), config).map_err(codec_error)?;
-        Ok(Self { encoder, yuv: None, even: Vec::new(), force_keyframe: false })
+        Ok(Self { encoder, yuv: None })
     }
 
-    /// Make the next frame a keyframe (a new viewer joined, or one lost data).
-    pub fn request_keyframe(&mut self) {
-        self.force_keyframe = true;
-    }
-
-    /// Change the target bitrate without restarting the stream (follows the
-    /// network's bandwidth estimate).
-    pub fn set_bitrate(&mut self, bps: u32) -> Result<()> {
+    fn set_bitrate(&mut self, bps: u32) -> Result<()> {
         use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
         let mut info = SBitrateInfo { iLayer: SPATIAL_LAYER_ALL, iBitrate: bps.min(i32::MAX as u32) as i32 };
         // SAFETY: the encoder is initialised (created in `new`), and
@@ -88,22 +355,14 @@ impl VideoEncoder {
         Ok(())
     }
 
-    /// Encode one frame. Returns `None` when rate control skipped it.
-    /// Frame sizes may change between calls (e.g. a resized window).
-    pub fn encode(&mut self, image: &RgbaImage, timestamp_ms: u64) -> Result<Option<EncodedFrame>> {
-        // 4:2:0 chroma needs even dimensions; drop a trailing row/column.
-        let width = image.width & !1;
-        let height = image.height & !1;
-        if width == 0 || height == 0 {
-            return Ok(None);
-        }
-        let pixels = if (width, height) == (image.width, image.height) {
-            &image.pixels[..]
-        } else {
-            crop(&image.pixels, image.width, width, height, &mut self.even);
-            &self.even[..]
-        };
-
+    fn encode(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        timestamp_ms: u64,
+        keyframe: bool,
+    ) -> Result<Option<EncodedFrame>> {
         let rgba = RgbaSliceU8::new(pixels, (width as usize, height as usize));
         let yuv = match &mut self.yuv {
             Some(yuv) if yuv.dimensions() == (width as usize, height as usize) => {
@@ -113,7 +372,7 @@ impl VideoEncoder {
             slot => slot.insert(YUVBuffer::from_rgba8_source(rgba)),
         };
 
-        if std::mem::take(&mut self.force_keyframe) {
+        if keyframe {
             self.encoder.force_intra_frame();
         }
         let stream =
@@ -184,7 +443,11 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_size_and_roughly_the_picture() {
-        let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 2_000_000 }).unwrap();
+        let mut encoder = VideoEncoder::with_preference(
+            EncoderSettings { fps: 30, bitrate_bps: 2_000_000 },
+            EncoderPreference::Software,
+        )
+        .unwrap();
         let mut decoder = VideoDecoder::new().unwrap();
         let mut decoded = 0;
         let mut keyframes = 0;
@@ -212,7 +475,11 @@ mod tests {
 
     #[test]
     fn odd_sizes_are_cropped_and_size_changes_work() {
-        let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 2_000_000 }).unwrap();
+        let mut encoder = VideoEncoder::with_preference(
+            EncoderSettings { fps: 30, bitrate_bps: 2_000_000 },
+            EncoderPreference::Software,
+        )
+        .unwrap();
         let mut decoder = VideoDecoder::new().unwrap();
 
         let encoded = encoder.encode(&frame(321, 181, 0), 0).unwrap().unwrap();
@@ -229,7 +496,11 @@ mod tests {
 
     #[test]
     fn requested_keyframe_is_honoured() {
-        let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 2_000_000 }).unwrap();
+        let mut encoder = VideoEncoder::with_preference(
+            EncoderSettings { fps: 30, bitrate_bps: 2_000_000 },
+            EncoderPreference::Software,
+        )
+        .unwrap();
         assert!(encoder.encode(&frame(320, 180, 0), 0).unwrap().unwrap().keyframe);
         let second = encoder.encode(&frame(320, 180, 1), 33).unwrap();
         assert!(second.is_none_or(|f| !f.keyframe));
@@ -256,7 +527,11 @@ mod tests {
                 .map(|f| f.data.len())
                 .sum()
         }
-        let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 4_000_000 }).unwrap();
+        let mut encoder = VideoEncoder::with_preference(
+            EncoderSettings { fps: 30, bitrate_bps: 4_000_000 },
+            EncoderPreference::Software,
+        )
+        .unwrap();
         let high = bytes_for(&mut encoder, 0);
         encoder.set_bitrate(500_000).unwrap();
         let _settle = bytes_for(&mut encoder, 30);

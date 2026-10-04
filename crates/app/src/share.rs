@@ -262,18 +262,25 @@ impl App {
         let (enc, dec) = (share.sender.counters().snapshot(), share.receiver.counters().snapshot());
         share.last_stats.set((enc, dec));
         let (e, d) = (enc.rates_since(&prev_enc), dec.rates_since(&prev_dec));
+        // The preview decodes exactly what viewers get, with nothing lost on
+        // the way: if it can't, the GPU encoder's output is the problem.
+        if enc.hardware && dec.errors > prev_dec.errors {
+            tracing::warn!("our own stream didn't decode; switching to software encoding");
+            share.sender.control().use_software();
+        }
 
         let mut text = if enc.width == 0 {
             "Waiting for the first frame…".to_owned()
         } else {
             format!(
-                "{}×{} · {:.0} fps (source {:.0}) · {} · encode {:.1} ms · delay {:.0} ms",
+                "{}×{} · {:.0} fps (source {:.0}) · {} · encode {:.1} ms ({}) · delay {:.0} ms",
                 enc.width,
                 enc.height,
                 e.fps,
                 e.source_fps,
                 format_rate(e.kbps),
                 e.busy_ms,
+                if enc.hardware { "GPU" } else { "CPU" },
                 d.latency_ms
             )
         };

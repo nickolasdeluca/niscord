@@ -5,6 +5,9 @@
 //! platforms every entry point reports [`Error::Unsupported`].
 
 pub mod audio;
+pub mod color;
+#[cfg(windows)]
+mod mf_encoder;
 mod pace;
 pub mod pipeline;
 mod scale;

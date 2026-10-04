@@ -4,7 +4,7 @@
 //! (the network, or a local [`VideoReceiver`] for a loopback preview).
 //! [`VideoReceiver`] runs decode and hands pictures to a callback.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -31,8 +31,12 @@ pub struct Counters {
     captured: AtomicU64,
     /// Sum of capture-to-output delay (only meaningful on one machine).
     latency_us: AtomicU64,
+    /// Access units the decoder rejected.
+    errors: AtomicU64,
     width: AtomicU32,
     height: AtomicU32,
+    /// Whether the GPU encoder is in use.
+    hardware: AtomicBool,
 }
 
 impl Counters {
@@ -57,8 +61,10 @@ impl Counters {
             captured: self.captured.load(Ordering::Relaxed),
             skipped: self.skipped.load(Ordering::Relaxed),
             latency_us: self.latency_us.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
             width: self.width.load(Ordering::Relaxed),
             height: self.height.load(Ordering::Relaxed),
+            hardware: self.hardware.load(Ordering::Relaxed),
         }
     }
 }
@@ -73,8 +79,10 @@ pub struct Snapshot {
     captured: u64,
     skipped: u64,
     latency_us: u64,
+    pub errors: u64,
     pub width: u32,
     pub height: u32,
+    pub hardware: bool,
 }
 
 /// Rates over the interval between two snapshots.
@@ -131,6 +139,7 @@ enum Control {
     Keyframe,
     Bitrate(u32),
     SourceClosed,
+    Software,
 }
 
 /// Cheap, thread-safe handle for steering a running [`VideoSender`].
@@ -146,6 +155,11 @@ impl SenderControl {
 
     pub fn set_bitrate(&self, bps: u32) {
         let _ = self.tx.send(Control::Bitrate(bps));
+    }
+
+    /// Stop using the hardware encoder for the rest of this stream.
+    pub fn use_software(&self) {
+        let _ = self.tx.send(Control::Software);
     }
 }
 
@@ -254,6 +268,7 @@ fn encode_loop(
                     }
                 }
                 Control::SourceClosed => sink.source_closed(),
+                Control::Software => encoder.disable_hardware(),
             }
         }
         let wait = if keyframe_pending { Duration::from_millis(20) } else { Duration::from_millis(50) };
@@ -275,6 +290,7 @@ fn encode_loop(
         match encoder.encode(&image, timestamp_ms) {
             Ok(Some(frame)) => {
                 keyframe_pending &= !frame.keyframe;
+                counters.hardware.store(encoder.is_hardware(), Ordering::Relaxed);
                 counters.record(frame.data.len(), began.elapsed(), None, frame.width, frame.height);
                 sink.encoded(&frame, captured_at);
             }
@@ -367,7 +383,10 @@ fn decode_loop(
                     on_frame(image);
                 }
                 Ok(None) => {}
-                Err(err) => tracing::debug!("decode failed: {err}"),
+                Err(err) => {
+                    counters.errors.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!("decode failed: {err}");
+                }
             }
         }
     }
@@ -376,7 +395,7 @@ fn decode_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video::{EncoderSettings, VideoEncoder};
+    use crate::video::{EncoderPreference, EncoderSettings, VideoEncoder};
 
     struct Collect(mpsc::Sender<(bool, Instant)>);
 
@@ -392,7 +411,11 @@ mod tests {
         let (frame_tx, frame_rx) = mpsc::channel();
         let (control_tx, control_rx) = mpsc::channel();
         let (out_tx, out) = mpsc::channel();
-        let encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 1_000_000 }).unwrap();
+        let encoder = VideoEncoder::with_preference(
+            EncoderSettings { fps: 30, bitrate_bps: 1_000_000 },
+            EncoderPreference::Software,
+        )
+        .unwrap();
         let thread = std::thread::spawn(move || {
             encode_loop(encoder, frame_rx, control_rx, Collect(out_tx), &Counters::default());
         });
@@ -426,7 +449,11 @@ mod tests {
         })
         .unwrap();
 
-        let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 1_000_000 }).unwrap();
+        let mut encoder = VideoEncoder::with_preference(
+            EncoderSettings { fps: 30, bitrate_bps: 1_000_000 },
+            EncoderPreference::Software,
+        )
+        .unwrap();
         for t in 0..5u8 {
             let pixels = (0..64 * 48).flat_map(|i| [(i as u8).wrapping_add(t * 9), t, 0, 255]).collect();
             let image = RgbaImage { width: 64, height: 48, pixels };

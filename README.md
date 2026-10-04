@@ -18,15 +18,16 @@ NAT), media is relayed through a TURN server you also host.
 | 3. H.264 encode/decode pipeline; your preview shows what viewers will get, with live stats | ✅ done |
 | 4. WebRTC between friends: Watch shows the live stream, bitrate follows the network | ✅ done |
 | 5. Audio: a window shares its app's sound, a screen shares everything but Niscord; Opus | ✅ done |
-| 6. Quality: hardware encoding, bitrate adaptation, keyframe recovery | ⏳ next |
-| 7. Packaging: portable `.exe`, server release binaries | |
+| 6. Quality: GPU encoding (NVIDIA/AMD/Intel) with software fallback, bitrate adaptation, keyframe recovery | ✅ done |
+| 7. Packaging: portable `.exe`, server release binaries | ⏳ next |
 
 ## Layout
 
 ```
 crates/
   protocol/   JSON messages shared by app and server
-  media/      capture (Windows Graphics Capture), H.264 (OpenH264), encode/decode threads,
+  media/      capture (Windows Graphics Capture), H.264 (GPU via Media Foundation, or
+              OpenH264), encode/decode threads,
               audio (WASAPI process loopback, Opus via unsafe-libopus)
   transport/  WebRTC (webrtc-rs): one connection per sharer/viewer pair, H.264 + Opus tracks
   server/     signaling server (presence, watch requests, WebRTC signaling relay)
@@ -67,8 +68,32 @@ To check audio capture on this machine (plays a very quiet tone and captures it)
 cargo run --release -p niscord-media --example audio_probe
 ```
 
+To compare the GPU and software encoders on synthetic 1080p60 and 1440p60 content:
+
+```sh
+cargo run --release -p niscord-media --example bench_encoders
+```
+
 Screen capture needs Windows 10 version 1903 or later. On Windows 10, Windows draws a
 yellow border around whatever is being captured; on Windows 11 Niscord hides it.
+
+### Encoding
+
+Niscord encodes with the GPU when it has an H.264 encoder (NVIDIA NVENC, AMD AMF or
+Intel Quick Sync, all reached through Media Foundation), and with OpenH264 on the CPU
+otherwise. On an RTX 3060 a 1080p60 frame takes about 4.5 ms on the GPU against 13 ms
+on a Ryzen 5 5600X, which makes 1080p60 and 1440p60 practical. The share's stats show
+which one is in use (`encode … ms (GPU)`).
+
+A GPU encoder takes about half a second to start and works at one frame size, so it
+starts in the background: the first frames of a share, and the frames while a shared
+window is being resized, are encoded in software, and the stream switches over (with a
+keyframe) once the GPU is ready. If the GPU encoder fails, or your own preview can't
+decode what it produced, Niscord switches to software for the rest of the share. Set
+`NISCORD_ENCODER=software` to always use the CPU.
+
+Viewers always decode with OpenH264: about 4 ms per 1080p frame and 9 ms per 1440p
+frame on a Ryzen 5 5600X.
 
 ### Audio
 
