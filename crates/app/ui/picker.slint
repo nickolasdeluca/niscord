@@ -1,4 +1,4 @@
-import { Button, Palette, ScrollView } from "std-widgets.slint";
+import { Button, ComboBox, Palette, ScrollView } from "std-widgets.slint";
 
 export struct SourceItem {
     // Index into the Rust-side source list; unique across both tabs.
@@ -113,6 +113,9 @@ export component SharePicker inherits Rectangle {
     in property <[SourceItem]> screens;
     in property <bool> sharing;
     in-out property <int> selected: -1;
+    // Indices into the resolution and frame-rate choices.
+    in-out property <int> resolution: 1;
+    in-out property <int> fps: 1;
     callback cancel();
     callback choose(int);
 
@@ -171,8 +174,27 @@ export component SharePicker inherits Rectangle {
                 activated(key) => { root.choose(key); }
             }
             HorizontalLayout {
-                alignment: end;
                 spacing: 8px;
+                Text {
+                    text: "Resolution";
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    model: ["720p", "1080p", "Source"];
+                    width: 120px;
+                    current-index <=> root.resolution;
+                }
+                Rectangle { width: 8px; }
+                Text {
+                    text: "Frame rate";
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    model: ["15 fps", "30 fps", "60 fps"];
+                    width: 120px;
+                    current-index <=> root.fps;
+                }
+                Rectangle { horizontal-stretch: 1; }
                 Button {
                     text: "Cancel";
                     clicked => { root.cancel(); }

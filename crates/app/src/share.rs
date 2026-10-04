@@ -1,16 +1,21 @@
-//! Choosing a source to share and running the local capture.
+//! Choosing a source to share and running the video pipeline.
+//!
+//! Until peers can connect, the encoded stream is decoded locally, so the
+//! preview shows exactly what viewers will get, with live stats.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use niscord_media::{Capture, CaptureOptions, FrameSink, RgbaImage, Source, SourceKind};
+use niscord_media::pipeline::{EncodedSink, Snapshot, StreamSettings, VideoReceiver, VideoSender};
+use niscord_media::video::{EncodedFrame, suggested_bitrate};
+use niscord_media::{RgbaImage, Source, SourceKind};
 use niscord_protocol::{ClientMsg, ShareKind};
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
+use crate::settings::{FRAME_RATES, Resolution, Settings};
 use crate::{App, SourceItem, thumbnails, with_app};
-
-/// Local preview only for now; the encoder will get its own settings.
-const PREVIEW: CaptureOptions = CaptureOptions { max_fps: 30, max_width: 1280, max_height: 720, show_cursor: true };
 
 pub struct Picker {
     sources: Vec<Source>,
@@ -21,11 +26,23 @@ pub struct Picker {
 
 pub struct ActiveShare {
     source: Source,
-    _capture: Capture,
+    // Field order matters: the sender (and its encoder thread, which feeds
+    // the receiver) must stop before the receiver.
+    sender: VideoSender,
+    receiver: Arc<VideoReceiver>,
+    last_stats: Cell<(Snapshot, Snapshot)>,
 }
 
 fn to_pixel_buffer(image: &RgbaImage) -> SharedPixelBuffer<Rgba8Pixel> {
     SharedPixelBuffer::clone_from_slice(&image.pixels, image.width, image.height)
+}
+
+/// Stream settings for a quality preset.
+fn stream_settings(source: &Source, resolution: Resolution, fps: u32) -> StreamSettings {
+    let (max_width, max_height) = resolution.max_size();
+    // Budget bits for the size frames will actually have, not the preset box.
+    let (w, h) = niscord_media::fit(source.width, source.height, max_width, max_height);
+    StreamSettings { max_width, max_height, fps, bitrate_bps: suggested_bitrate(w, h, fps), show_cursor: true }
 }
 
 impl App {
@@ -73,6 +90,9 @@ impl App {
         ui.set_picker_windows(ModelRc::from(windows.clone()));
         ui.set_picker_screens(ModelRc::from(screens.clone()));
         ui.set_picker_selected(selected);
+        let settings = Settings::load();
+        ui.set_picker_resolution(Resolution::ALL.iter().position(|r| *r == settings.resolution).unwrap_or(1) as i32);
+        ui.set_picker_fps(FRAME_RATES.iter().position(|f| *f == settings.fps).unwrap_or(1) as i32);
         ui.set_picker_open(true);
         *self.picker.borrow_mut() = Some(Picker { sources, windows, screens, _thumbnails: job });
     }
@@ -105,24 +125,39 @@ impl App {
 
     pub fn choose_source(&self, key: i32) {
         let source = self.picker.borrow().as_ref().and_then(|p| p.sources.get(key as usize).cloned());
+        let ui = self.ui();
+        let resolution = Resolution::ALL.get(ui.get_picker_resolution() as usize).copied().unwrap_or_default();
+        let fps = FRAME_RATES.get(ui.get_picker_fps() as usize).copied().unwrap_or(30);
+        let mut settings = Settings::load();
+        settings.resolution = resolution;
+        settings.fps = fps;
+        settings.save();
+
         self.close_picker();
         if let Some(source) = source {
-            self.start_share(source);
+            self.start_share(source, resolution, fps);
         }
     }
 
-    fn start_share(&self, source: Source) {
-        // Release the previous capture before starting a new one.
+    fn start_share(&self, source: Source, resolution: Resolution, fps: u32) {
+        // Release the previous pipeline before starting a new one.
         let was_sharing = self.share.borrow_mut().take().is_some();
         let generation = self.share_generation.get() + 1;
         self.share_generation.set(generation);
 
-        let sink = PreviewSink { generation, latest: Arc::default() };
-        let capture = match Capture::start(source.id, PREVIEW, sink) {
-            Ok(capture) => capture,
+        let slot = FrameSlot { generation, latest: Arc::default() };
+        let started = VideoReceiver::start(move |image| slot.offer(image)).and_then(|receiver| {
+            let receiver = Arc::new(receiver);
+            let sink = LoopbackSink { generation, receiver: receiver.clone() };
+            let settings = stream_settings(&source, resolution, fps);
+            tracing::info!(title = source.title, ?settings, "sharing");
+            VideoSender::start(source.id, settings, sink).map(|sender| (sender, receiver))
+        });
+        let (sender, receiver) = match started {
+            Ok(pipeline) => pipeline,
             Err(err) => {
-                tracing::warn!(title = source.title, "capture failed: {err}");
-                self.show_notice(format!("Couldn't capture \"{}\": {err}", source.title));
+                tracing::warn!(title = source.title, "could not start sharing: {err}");
+                self.show_notice(format!("Couldn't share \"{}\": {err}", source.title));
                 self.ui().set_sharing(false);
                 if was_sharing {
                     self.send(ClientMsg::ShareStop);
@@ -130,13 +165,17 @@ impl App {
                 return;
             }
         };
-        tracing::info!(title = source.title, "sharing");
 
         let ui = self.ui();
         ui.set_share_title(source.title.as_str().into());
         ui.set_preview(Image::default());
+        ui.set_stream_stats("Starting…".into());
         ui.set_sharing(true);
-        *self.share.borrow_mut() = Some(ActiveShare { source, _capture: capture });
+        let last_stats = Cell::new((sender.counters().snapshot(), receiver.counters().snapshot()));
+        *self.share.borrow_mut() = Some(ActiveShare { source, sender, receiver, last_stats });
+        self.stats_timer.start(slint::TimerMode::Repeated, Duration::from_secs(1), || {
+            with_app(|app| app.update_stream_stats());
+        });
         self.announce_share();
     }
 
@@ -153,6 +192,7 @@ impl App {
 
     pub fn stop_share(&self, notice: Option<&str>) {
         self.share_generation.set(self.share_generation.get() + 1);
+        self.stats_timer.stop();
         let was_sharing = self.share.borrow_mut().take().is_some();
         let ui = self.ui();
         ui.set_sharing(false);
@@ -170,17 +210,44 @@ impl App {
             self.ui().set_preview(Image::from_rgba8(to_pixel_buffer(&image)));
         }
     }
+
+    fn update_stream_stats(&self) {
+        let share = self.share.borrow();
+        let Some(share) = share.as_ref() else { return };
+        let (prev_enc, prev_dec) = share.last_stats.get();
+        let (enc, dec) = (share.sender.counters().snapshot(), share.receiver.counters().snapshot());
+        share.last_stats.set((enc, dec));
+        let (e, d) = (enc.rates_since(&prev_enc), dec.rates_since(&prev_dec));
+
+        let mut text = if enc.width == 0 {
+            "Waiting for the first frame…".to_owned()
+        } else {
+            let rate =
+                if e.kbps >= 1000.0 { format!("{:.1} Mbps", e.kbps / 1000.0) } else { format!("{:.0} kbps", e.kbps) };
+            format!(
+                "{}×{} · {:.0} fps (source {:.0}) · {rate} · encode {:.1} ms · decode {:.1} ms · delay {:.0} ms",
+                enc.width, enc.height, e.fps, e.source_fps, e.busy_ms, d.busy_ms, d.latency_ms
+            )
+        };
+        if e.dropped + d.dropped > 0 {
+            text += &format!(" · {} dropped", e.dropped + d.dropped);
+        }
+        if e.skipped > 0 {
+            text += &format!(" · {} skipped by encoder", e.skipped);
+        }
+        self.ui().set_stream_stats(text.into());
+    }
 }
 
-/// Forwards captured frames to the UI, keeping only the newest one so a busy
-/// UI thread skips frames instead of queueing them.
-struct PreviewSink {
+/// Hands decoded frames to the UI, keeping only the newest one so a busy UI
+/// thread skips frames instead of queueing them.
+struct FrameSlot {
     generation: u64,
     latest: Arc<Mutex<Option<RgbaImage>>>,
 }
 
-impl FrameSink for PreviewSink {
-    fn frame(&mut self, image: RgbaImage) {
+impl FrameSlot {
+    fn offer(&self, image: RgbaImage) {
         // If a frame was already waiting, a UI update is already scheduled.
         if self.latest.lock().unwrap().replace(image).is_some() {
             return;
@@ -193,8 +260,21 @@ impl FrameSink for PreviewSink {
             }
         });
     }
+}
 
-    fn closed(&mut self) {
+/// Feeds encoded frames straight into a local decoder (stand-in for the
+/// network until peers can connect).
+struct LoopbackSink {
+    generation: u64,
+    receiver: Arc<VideoReceiver>,
+}
+
+impl EncodedSink for LoopbackSink {
+    fn encoded(&mut self, frame: &EncodedFrame, captured_at: Instant) {
+        self.receiver.push(frame.data.clone(), frame.keyframe, Some(captured_at));
+    }
+
+    fn source_closed(&mut self) {
         let generation = self.generation;
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| {

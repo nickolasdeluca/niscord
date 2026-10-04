@@ -35,6 +35,7 @@ struct App {
     share: RefCell<Option<share::ActiveShare>>,
     /// Bumped whenever sharing starts or stops, to drop stale frames.
     share_generation: Cell<u64>,
+    stats_timer: slint::Timer,
 }
 
 thread_local! {
@@ -68,12 +69,11 @@ impl App {
             ui.set_connect_error("Choose a display name.".into());
             return;
         }
-        Settings {
-            server_url: ui.get_server_url().trim().to_owned(),
-            name: params.name.clone(),
-            password: params.password.clone(),
-        }
-        .save();
+        let mut settings = Settings::load();
+        settings.server_url = ui.get_server_url().trim().to_owned();
+        settings.name = params.name.clone();
+        settings.password = params.password.clone();
+        settings.save();
 
         ui.set_connect_error("".into());
         ui.set_connecting(true);
@@ -225,6 +225,7 @@ fn main() -> anyhow::Result<()> {
         picker_generation: Cell::new(0),
         share: RefCell::new(None),
         share_generation: Cell::new(0),
+        stats_timer: slint::Timer::default(),
     });
     APP.with(|a| *a.borrow_mut() = Some(app));
 

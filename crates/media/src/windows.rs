@@ -16,6 +16,7 @@ use windows_capture::settings::{
 };
 use windows_capture::window::Window;
 
+use crate::pace::Pacer;
 use crate::scale::downscale_rgba;
 use crate::{CaptureOptions, Error, FrameSink, Result, RgbaImage, Source, SourceId, SourceKind};
 
@@ -208,8 +209,7 @@ pub fn capture_thumbnail(id: SourceId, max_width: u32, max_height: u32, timeout:
 struct StreamHandler {
     options: CaptureOptions,
     sink: Box<dyn FrameSink>,
-    min_gap: Duration,
-    last: Option<Instant>,
+    pacer: Pacer,
 }
 
 impl GraphicsCaptureApiHandler for StreamHandler {
@@ -218,8 +218,7 @@ impl GraphicsCaptureApiHandler for StreamHandler {
 
     fn new(ctx: Context<Self::Flags>) -> std::result::Result<Self, Self::Error> {
         let (options, sink) = ctx.flags;
-        let min_gap = Duration::from_secs(1) / options.max_fps.max(1);
-        Ok(Self { options, sink, min_gap, last: None })
+        Ok(Self { pacer: Pacer::new(options.max_fps), options, sink })
     }
 
     fn on_frame_arrived(
@@ -227,16 +226,9 @@ impl GraphicsCaptureApiHandler for StreamHandler {
         frame: &mut Frame,
         _control: InternalCaptureControl,
     ) -> std::result::Result<(), Self::Error> {
-        // Windows may deliver frames faster than requested (or ignore the
-        // interval on older builds), so pace here too. The small tolerance
-        // keeps 60 fps sources from being cut to 30 by timing jitter.
-        let now = Instant::now();
-        if let Some(last) = self.last
-            && now.duration_since(last) < self.min_gap.mul_f32(0.9)
-        {
+        if !self.pacer.accept(Instant::now()) {
             return Ok(());
         }
-        self.last = Some(now);
         let image = frame_to_rgba(frame, self.options.max_width, self.options.max_height)?;
         self.sink.frame(image);
         Ok(())
@@ -255,7 +247,10 @@ pub struct RunningCapture {
 impl RunningCapture {
     pub fn start(id: SourceId, options: CaptureOptions, sink: Box<dyn FrameSink>) -> Result<Self> {
         let item = resolve(id)?;
-        let interval = Duration::from_secs(1) / options.max_fps.max(1);
+        // Ask Windows for up to twice the target rate and pace precisely
+        // ourselves: its throttle measures from the last delivered frame,
+        // which can halve the rate of a source just above the target.
+        let interval = Duration::from_secs(1) / (options.max_fps.max(1) * 2);
         let settings = settings(item, options.show_cursor, Some(interval), (options, sink));
         let control = StreamHandler::start_free_threaded(settings).map_err(capture_error)?;
         Ok(Self { control: Some(control) })

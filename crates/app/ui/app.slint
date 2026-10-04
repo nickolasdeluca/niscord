@@ -199,6 +199,7 @@ component MainScreen inherits Rectangle {
     in property <bool> sharing;
     in property <string> share-title;
     in property <image> preview;
+    in property <string> stream-stats;
     callback watch(string);
     callback unwatch(string);
     callback share();
@@ -321,6 +322,21 @@ component MainScreen inherits Rectangle {
                             }
                         }
                     }
+                    // What viewers will receive, after encoding.
+                    Rectangle {
+                        x: 10px;
+                        y: parent.height - self.height - 10px;
+                        width: min(stats.preferred-width + 12px, parent.width - 20px);
+                        height: stats.preferred-height + 8px;
+                        background: #000000a0;
+                        border-radius: 6px;
+                        stats := Text {
+                            text: root.stream-stats;
+                            color: #ffffffd0;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
                 }
                 HorizontalLayout {
                     alignment: center;
@@ -384,10 +400,13 @@ export component AppWindow inherits Window {
     in property <bool> sharing;
     in property <string> share-title;
     in property <image> preview;
+    in property <string> stream-stats;
     in property <bool> picker-open;
     in property <[SourceItem]> picker-windows;
     in property <[SourceItem]> picker-screens;
     in-out property <int> picker-selected: -1;
+    in-out property <int> picker-resolution: 1;
+    in-out property <int> picker-fps: 1;
 
     callback connect();
     callback disconnect();
@@ -443,6 +462,7 @@ export component AppWindow inherits Window {
         sharing: root.sharing;
         share-title: root.share-title;
         preview: root.preview;
+        stream-stats: root.stream-stats;
         watch(id) => { root.watch(id); }
         unwatch(id) => { root.unwatch(id); }
         share => { root.share(); }
@@ -456,6 +476,8 @@ export component AppWindow inherits Window {
         screens: root.picker-screens;
         sharing: root.sharing;
         selected <=> root.picker-selected;
+        resolution <=> root.picker-resolution;
+        fps <=> root.picker-fps;
         cancel => { root.picker-cancel(); }
         choose(key) => { root.picker-choose(key); }
     }

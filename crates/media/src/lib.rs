@@ -4,13 +4,16 @@
 //! single windows, including GPU-rendered ones such as games. On other
 //! platforms every entry point reports [`Error::Unsupported`].
 
+mod pace;
+pub mod pipeline;
 mod scale;
+pub mod video;
 #[cfg(windows)]
 mod windows;
 
 use std::time::Duration;
 
-pub use scale::downscale_rgba;
+pub use scale::{downscale_rgba, fit};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -22,6 +25,8 @@ pub enum Error {
     Timeout,
     #[error("capture failed: {0}")]
     Capture(String),
+    #[error("video codec error: {0}")]
+    Codec(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -15,8 +15,8 @@ NAT), media is relayed through a TURN server you also host.
 |---|---|
 | 1. Workspace, signaling server, app with connect screen and online list | ✅ done |
 | 2. Screen/window picker with live thumbnails, local preview of your share | ✅ done |
-| 3. Local capture → encode → decode → display loop | ⏳ next |
-| 4. WebRTC transport between peers (Watch actually shows video) | |
+| 3. H.264 encode/decode pipeline; your preview shows what viewers will get, with live stats | ✅ done |
+| 4. WebRTC transport between peers (Watch actually shows video) | ⏳ next |
 | 5. Audio: system-wide or per-app loopback, Opus | |
 | 6. Quality: hardware encoding, bitrate adaptation, keyframe recovery | |
 | 7. Packaging: portable `.exe`, server release binaries | |
@@ -26,14 +26,18 @@ NAT), media is relayed through a TURN server you also host.
 ```
 crates/
   protocol/   JSON messages shared by app and server
-  media/      screen/window capture (Windows Graphics Capture)
+  media/      capture (Windows Graphics Capture), H.264 (OpenH264), encode/decode threads
   server/     signaling server (presence, watch requests, WebRTC signaling relay)
   app/        the Slint desktop app (`niscord.exe`)
 ```
 
 ## Development
 
-Requires a stable Rust toolchain.
+Requires a stable Rust toolchain and [NASM](https://www.nasm.us) on `PATH`
+(`winget install NASM.NASM`). Without NASM, OpenH264 silently builds without its SIMD
+code and encodes 4-6x slower; the build prints a warning when it is missing. After
+installing it, run `cargo clean -p openh264-sys2` once. Friends running the built app
+don't need it.
 
 ```sh
 cargo run -p niscord-server                  # server on ws://0.0.0.0:8080
@@ -47,10 +51,12 @@ To test with one machine, run a fake friend who appears to be sharing:
 cargo run -p niscord-server --example fake_peer -- ws://127.0.0.1:8080 "Bia" [password]
 ```
 
-To list capture sources and time a thumbnail grab of each:
+To list capture sources and time a thumbnail grab of each, or to time the whole
+capture → encode → decode pipeline on your primary screen:
 
 ```sh
 cargo run -p niscord-media --example probe
+cargo run --release -p niscord-media --example bench_codec -- 1920 1080 30
 ```
 
 Screen capture needs Windows 10 version 1903 or later. On Windows 10, Windows draws a

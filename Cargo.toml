@@ -26,6 +26,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [profile.dev.package.niscord-media]
 opt-level = 3
 
+[profile.dev.package.openh264-sys2]
+opt-level = 3
+
+[profile.dev.package.openh264]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
