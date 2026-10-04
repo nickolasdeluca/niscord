@@ -50,16 +50,19 @@ pub struct VideoEncoder {
 impl VideoEncoder {
     pub fn new(settings: EncoderSettings) -> Result<Self> {
         let config = EncoderConfig::new()
-            .usage_type(UsageType::ScreenContentRealTime)
-            // Not supported in screen content mode; OpenH264 warns otherwise.
-            .adaptive_quantization(false)
-            .background_detection(false)
+            // Despite the name, the camera mode suits screen sharing better
+            // here: OpenH264's screen-content rate control largely ignores
+            // the bitrate target (5+ Mbps when asked for 0.5 on busy content)
+            // and gave lower quality on scrolling text (~48 vs ~56 dB PSNR).
+            // See examples/rc_probe.rs.
+            .usage_type(UsageType::CameraVideoRealTime)
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(settings.bitrate_bps))
             .max_frame_rate(FrameRate::from_hz(settings.fps as f32))
-            // Keep every frame and lower quality when bits run short: a
-            // choppy stream feels worse than a briefly blurrier one.
-            .skip_frames(false)
+            // When even the coarsest quantizer can't fit the target, drop a
+            // frame rather than overflow the network link (which would lose
+            // packets and freeze the picture until the next keyframe).
+            .skip_frames(true)
             .intra_frame_period(IntraFramePeriod::from_num_frames(settings.fps * KEYFRAME_INTERVAL_SECS));
         let encoder = Encoder::with_api_config(OpenH264API::from_source(), config).map_err(codec_error)?;
         Ok(Self { encoder, yuv: None, even: Vec::new(), force_keyframe: false })
@@ -68,6 +71,21 @@ impl VideoEncoder {
     /// Make the next frame a keyframe (a new viewer joined, or one lost data).
     pub fn request_keyframe(&mut self) {
         self.force_keyframe = true;
+    }
+
+    /// Change the target bitrate without restarting the stream (follows the
+    /// network's bandwidth estimate).
+    pub fn set_bitrate(&mut self, bps: u32) -> Result<()> {
+        use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
+        let mut info = SBitrateInfo { iLayer: SPATIAL_LAYER_ALL, iBitrate: bps.min(i32::MAX as u32) as i32 };
+        // SAFETY: the encoder is initialised (created in `new`), and
+        // ENCODER_OPTION_BITRATE takes a pointer to an SBitrateInfo that only
+        // needs to live for the duration of the call.
+        let rc = unsafe { self.encoder.raw_api().set_option(ENCODER_OPTION_BITRATE, (&raw mut info).cast()) };
+        if rc != 0 {
+            return Err(Error::Codec(format!("setting bitrate to {bps} failed ({rc})")));
+        }
+        Ok(())
     }
 
     /// Encode one frame. Returns `None` when rate control skipped it.
@@ -217,6 +235,33 @@ mod tests {
         assert!(second.is_none_or(|f| !f.keyframe));
         encoder.request_keyframe();
         assert!(encoder.encode(&frame(320, 180, 2), 66).unwrap().unwrap().keyframe);
+    }
+
+    #[test]
+    fn bitrate_can_change_mid_stream() {
+        /// Busy moving content, so the encoder uses every bit it is allowed.
+        fn noisy(t: u32) -> RgbaImage {
+            let mut pixels = Vec::with_capacity(640 * 360 * 4);
+            for y in 0..360u32 {
+                for x in 0..640u32 {
+                    let v = ((x + t * 13) ^ (y * 3 + t * 7)) as u8;
+                    pixels.extend_from_slice(&[v, (x / 5 + t * 4) as u8, (y / 3) as u8 ^ v, 255]);
+                }
+            }
+            RgbaImage { width: 640, height: 360, pixels }
+        }
+        fn bytes_for(encoder: &mut VideoEncoder, from: u32) -> usize {
+            (from..from + 30)
+                .filter_map(|t| encoder.encode(&noisy(t), t as u64 * 33).unwrap())
+                .map(|f| f.data.len())
+                .sum()
+        }
+        let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 4_000_000 }).unwrap();
+        let high = bytes_for(&mut encoder, 0);
+        encoder.set_bitrate(500_000).unwrap();
+        let _settle = bytes_for(&mut encoder, 30);
+        let low = bytes_for(&mut encoder, 60);
+        assert!(low * 2 < high, "lowering the bitrate had no effect: {high} -> {low} bytes");
     }
 
     #[test]

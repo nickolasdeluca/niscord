@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 openh264 = "0.9"
+# Same version openh264 uses; only for option constants it doesn't re-export.
+openh264-sys2 = "0.9"
 thiserror = "2"
 tracing.workspace = true
 

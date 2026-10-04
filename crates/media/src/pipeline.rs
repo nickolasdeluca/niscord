@@ -129,7 +129,24 @@ pub trait EncodedSink: Send + 'static {
 
 enum Control {
     Keyframe,
+    Bitrate(u32),
     SourceClosed,
+}
+
+/// Cheap, thread-safe handle for steering a running [`VideoSender`].
+#[derive(Clone)]
+pub struct SenderControl {
+    tx: mpsc::Sender<Control>,
+}
+
+impl SenderControl {
+    pub fn request_keyframe(&self) {
+        let _ = self.tx.send(Control::Keyframe);
+    }
+
+    pub fn set_bitrate(&self, bps: u32) {
+        let _ = self.tx.send(Control::Bitrate(bps));
+    }
 }
 
 /// Captures a source and encodes it to H.264 until dropped.
@@ -188,8 +205,8 @@ impl VideoSender {
         Ok(Self { capture: Some(capture), control: control_tx, thread: Some(thread), counters })
     }
 
-    pub fn request_keyframe(&self) {
-        let _ = self.control.send(Control::Keyframe);
+    pub fn control(&self) -> SenderControl {
+        SenderControl { tx: self.control.clone() }
     }
 
     pub fn counters(&self) -> Arc<Counters> {
@@ -221,6 +238,11 @@ fn encode_loop(
         for msg in control.try_iter() {
             match msg {
                 Control::Keyframe => encoder.request_keyframe(),
+                Control::Bitrate(bps) => {
+                    if let Err(err) = encoder.set_bitrate(bps) {
+                        tracing::warn!("{err}");
+                    }
+                }
                 Control::SourceClosed => sink.source_closed(),
             }
         }

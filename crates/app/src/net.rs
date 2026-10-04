@@ -61,6 +61,11 @@ impl Session {
     pub fn send(&self, msg: ClientMsg) {
         let _ = self.tx.send(msg);
     }
+
+    /// A handle other threads can send through.
+    pub fn sender(&self) -> mpsc::UnboundedSender<ClientMsg> {
+        self.tx.clone()
+    }
 }
 
 impl Drop for Session {

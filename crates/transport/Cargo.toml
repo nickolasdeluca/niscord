@@ -1,0 +1,23 @@
+[package]
+name = "niscord-transport"
+description = "WebRTC transport for Niscord streams"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+niscord-protocol.workspace = true
+
+anyhow.workspace = true
+async-trait = "0.1"
+bytes = "1"
+rtc = "0.21"
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+webrtc = "0.21"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+niscord-media.workspace = true

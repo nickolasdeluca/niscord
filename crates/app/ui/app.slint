@@ -1,7 +1,8 @@
 import { AboutSlint, Button, LineEdit, ListView, Palette } from "std-widgets.slint";
 import { SharePicker, SourceItem } from "picker.slint";
+import { Stage, StreamTile } from "stage.slint";
 
-export { SourceItem }
+export { SourceItem, StreamTile }
 
 export struct PeerItem {
     id: string,
@@ -197,13 +198,14 @@ component MainScreen inherits Rectangle {
     in property <bool> online;
     in property <string> status-text;
     in property <bool> sharing;
-    in property <string> share-title;
-    in property <image> preview;
-    in property <string> stream-stats;
+    in property <[StreamTile]> tiles;
+    in-out property <string> focused;
     callback watch(string);
     callback unwatch(string);
     callback share();
     callback stop-share();
+    callback close-stream(string);
+    callback retry-stream(string);
     callback disconnect();
     callback about();
 
@@ -286,90 +288,13 @@ component MainScreen inherits Rectangle {
         }
 
         // Stage: your own stream preview and streams being watched.
-        if root.sharing: Rectangle {
+        Stage {
             horizontal-stretch: 1;
-            VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
-                Rectangle {
-                    vertical-stretch: 1;
-                    background: black;
-                    border-radius: 8px;
-                    clip: true;
-                    Image {
-                        width: parent.width;
-                        height: parent.height;
-                        source: root.preview;
-                        image-fit: contain;
-                    }
-                    Rectangle {
-                        x: 10px;
-                        y: 10px;
-                        width: caption.preferred-width;
-                        height: caption.preferred-height;
-                        background: #000000a0;
-                        border-radius: 6px;
-                        caption := HorizontalLayout {
-                            padding: 6px;
-                            spacing: 6px;
-                            LiveBadge { }
-                            Text {
-                                text: "You · " + root.share-title;
-                                color: white;
-                                font-weight: 600;
-                                max-width: 400px;
-                                overflow: elide;
-                            }
-                        }
-                    }
-                    // What viewers will receive, after encoding.
-                    Rectangle {
-                        x: 10px;
-                        y: parent.height - self.height - 10px;
-                        width: min(stats.preferred-width + 12px, parent.width - 20px);
-                        height: stats.preferred-height + 8px;
-                        background: #000000a0;
-                        border-radius: 6px;
-                        stats := Text {
-                            text: root.stream-stats;
-                            color: #ffffffd0;
-                            font-size: 11px;
-                            overflow: elide;
-                        }
-                    }
-                }
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 8px;
-                    Button {
-                        text: "Change source";
-                        enabled: root.online;
-                        clicked => { root.share(); }
-                    }
-                    Button {
-                        text: "Stop sharing";
-                        clicked => { root.stop-share(); }
-                    }
-                }
-            }
-        }
-        if !root.sharing: Rectangle {
-            horizontal-stretch: 1;
-            VerticalLayout {
-                alignment: center;
-                spacing: 6px;
-                Text {
-                    text: "Nobody's stream is open";
-                    font-size: 20px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                }
-                Text {
-                    text: "Click Watch next to someone who is LIVE.";
-                    horizontal-alignment: center;
-                    color: Palette.foreground.transparentize(0.4);
-                }
-            }
+            tiles: root.tiles;
+            focused <=> root.focused;
+            close(key) => { root.close-stream(key); }
+            retry(key) => { root.retry-stream(key); }
+            change-source => { root.share(); }
         }
     }
 }
@@ -396,11 +321,10 @@ export component AppWindow inherits Window {
     in property <[PeerItem]> peers;
     in property <string> notice;
 
-    // Sharing.
+    // Sharing and watching.
     in property <bool> sharing;
-    in property <string> share-title;
-    in property <image> preview;
-    in property <string> stream-stats;
+    in property <[StreamTile]> tiles;
+    in-out property <string> focused-stream;
     in property <bool> picker-open;
     in property <[SourceItem]> picker-windows;
     in property <[SourceItem]> picker-screens;
@@ -415,6 +339,8 @@ export component AppWindow inherits Window {
     // Open the source picker.
     callback share();
     callback stop-share();
+    callback close-stream(string);
+    callback retry-stream(string);
     callback picker-cancel();
     callback picker-choose(int);
 
@@ -460,9 +386,10 @@ export component AppWindow inherits Window {
         online: root.online;
         status-text: root.status-text;
         sharing: root.sharing;
-        share-title: root.share-title;
-        preview: root.preview;
-        stream-stats: root.stream-stats;
+        tiles: root.tiles;
+        focused <=> root.focused-stream;
+        close-stream(key) => { root.close-stream(key); }
+        retry-stream(key) => { root.retry-stream(key); }
         watch(id) => { root.watch(id); }
         unwatch(id) => { root.unwatch(id); }
         share => { root.share(); }

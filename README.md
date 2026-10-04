@@ -16,8 +16,8 @@ NAT), media is relayed through a TURN server you also host.
 | 1. Workspace, signaling server, app with connect screen and online list | ✅ done |
 | 2. Screen/window picker with live thumbnails, local preview of your share | ✅ done |
 | 3. H.264 encode/decode pipeline; your preview shows what viewers will get, with live stats | ✅ done |
-| 4. WebRTC transport between peers (Watch actually shows video) | ⏳ next |
-| 5. Audio: system-wide or per-app loopback, Opus | |
+| 4. WebRTC between friends: Watch shows the live stream, bitrate follows the network | ✅ done |
+| 5. Audio: system-wide or per-app loopback, Opus | ⏳ next |
 | 6. Quality: hardware encoding, bitrate adaptation, keyframe recovery | |
 | 7. Packaging: portable `.exe`, server release binaries | |
 
@@ -27,6 +27,7 @@ NAT), media is relayed through a TURN server you also host.
 crates/
   protocol/   JSON messages shared by app and server
   media/      capture (Windows Graphics Capture), H.264 (OpenH264), encode/decode threads
+  transport/  WebRTC (webrtc-rs): one connection per sharer/viewer pair, frame reassembly
   server/     signaling server (presence, watch requests, WebRTC signaling relay)
   app/        the Slint desktop app (`niscord.exe`)
 ```
@@ -61,6 +62,14 @@ cargo run --release -p niscord-media --example bench_codec -- 1920 1080 30
 
 Screen capture needs Windows 10 version 1903 or later. On Windows 10, Windows draws a
 yellow border around whatever is being captured; on Windows 11 Niscord hides it.
+
+### Testing WebRTC on one machine
+
+The first time a new build of the app (or a test binary) opens a UDP socket, Windows
+Firewall asks whether to allow it, even for sockets bound to `127.0.0.1`. Traffic on
+the same machine flows either way, so these prompts can be cancelled safely. To keep a
+debug build on loopback only, set `NISCORD_UDP_ADDR=127.0.0.1:0` (and run the server with
+`NISCORD_BIND=127.0.0.1:8080`).
 
 ## Running the server
 
@@ -118,7 +127,10 @@ Bake your server address into the build so friends only need a name and the pass
 NISCORD_DEFAULT_SERVER=wss://niscord.example.com cargo build --release -p niscord
 ```
 
-Share `target/release/niscord.exe`. It needs no installer or runtime. The app remembers
+Share `target/release/niscord.exe`. It needs no installer or runtime. The first time a
+friend watches or shares, Windows Firewall asks whether Niscord may use the network:
+they should allow it (private networks is enough), or direct connections between
+friends will fail and everything will have to go through TURN. The app remembers
 the server, name and password in `%APPDATA%\Niscord\settings.json` (the password is
 stored in plain text).
 

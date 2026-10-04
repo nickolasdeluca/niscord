@@ -1,0 +1,180 @@
+import { Button, Palette } from "std-widgets.slint";
+
+export struct StreamTile {
+    // "self" for your own stream, otherwise the sharer's peer id.
+    key: string,
+    name: string,
+    title: string,
+    frame: image,
+    has-frame: bool,
+    stats: string,
+    // Shown over the picture while there is nothing to show yet.
+    status: string,
+    is-self: bool,
+    failed: bool,
+}
+
+component LiveBadge inherits Rectangle {
+    background: #ed4245;
+    border-radius: 3px;
+    width: label.preferred-width + 8px;
+    height: label.preferred-height + 2px;
+    label := Text {
+        text: "LIVE";
+        color: white;
+        font-size: 10px;
+        font-weight: 800;
+    }
+}
+
+component Tile inherits Rectangle {
+    in property <StreamTile> tile;
+    in property <bool> focused;
+    callback close();
+    callback retry();
+    callback change-source();
+    callback toggle-focus();
+
+    background: black;
+    border-radius: 8px;
+    clip: true;
+
+    if root.tile.has-frame: Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.tile.frame;
+        image-fit: contain;
+    }
+
+    if root.tile.status != "": VerticalLayout {
+        alignment: center;
+        spacing: 10px;
+        Text {
+            text: root.tile.status;
+            color: root.tile.failed ? #ed4245 : #ffffffb0;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        if root.tile.failed: HorizontalLayout {
+            alignment: center;
+            Button {
+                text: "Try again";
+                clicked => { root.retry(); }
+            }
+        }
+    }
+
+    // Double-click to focus one stream / go back to the grid.
+    TouchArea {
+        double-clicked => { root.toggle-focus(); }
+    }
+
+    // Caption.
+    Rectangle {
+        x: 10px;
+        y: 10px;
+        width: caption.preferred-width;
+        height: caption.preferred-height;
+        background: #000000a0;
+        border-radius: 6px;
+        caption := HorizontalLayout {
+            padding: 6px;
+            spacing: 6px;
+            LiveBadge { }
+            Text {
+                text: root.tile.name + (root.tile.title != "" ? " · " + root.tile.title : "");
+                color: white;
+                font-weight: 600;
+                max-width: max(80px, root.width - 260px);
+                overflow: elide;
+            }
+        }
+    }
+
+    // Actions.
+    HorizontalLayout {
+        x: parent.width - self.preferred-width - 10px;
+        y: 10px;
+        width: self.preferred-width;
+        height: self.preferred-height;
+        spacing: 6px;
+        Button {
+            text: root.focused ? "Show all" : "Focus";
+            clicked => { root.toggle-focus(); }
+        }
+        if root.tile.is-self: Button {
+            text: "Change";
+            clicked => { root.change-source(); }
+        }
+        Button {
+            text: root.tile.is-self ? "Stop sharing" : "Close";
+            clicked => { root.close(); }
+        }
+    }
+
+    // Stats.
+    if root.tile.stats != "": Rectangle {
+        x: 10px;
+        y: parent.height - self.height - 10px;
+        width: min(stats.preferred-width + 12px, parent.width - 20px);
+        height: stats.preferred-height + 8px;
+        background: #000000a0;
+        border-radius: 6px;
+        stats := Text {
+            text: root.tile.stats;
+            color: #ffffffd0;
+            font-size: 11px;
+            overflow: elide;
+        }
+    }
+}
+
+// Your stream preview plus every stream you watch, in a grid; one can be
+// focused to fill the stage.
+export component Stage inherits Rectangle {
+    in property <[StreamTile]> tiles;
+    in-out property <string> focused;
+    callback close(string);
+    callback retry(string);
+    callback change-source();
+
+    property <length> gap: 10px;
+    property <length> pad: 16px;
+    property <bool> focusing: root.focused != "";
+    property <int> count: root.tiles.length;
+    property <int> cols: root.count <= 1 ? 1 : root.count <= 4 ? 2 : 3;
+    property <int> rows: max(1, ceil(root.count / root.cols));
+    property <length> tile-w: (root.width - 2 * root.pad - (root.cols - 1) * root.gap) / root.cols;
+    property <length> tile-h: (root.height - 2 * root.pad - (root.rows - 1) * root.gap) / root.rows;
+
+    if root.count == 0: VerticalLayout {
+        alignment: center;
+        spacing: 6px;
+        Text {
+            text: "Nobody's stream is open";
+            font-size: 20px;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Click Watch next to someone who is LIVE, or share your screen.";
+            horizontal-alignment: center;
+            color: Palette.foreground.transparentize(0.4);
+        }
+    }
+
+    for tile[i] in root.tiles: Tile {
+        property <bool> is-focused: root.focused == tile.key;
+        visible: !root.focusing || self.is-focused;
+        x: root.focusing ? root.pad : root.pad + mod(i, root.cols) * (root.tile-w + root.gap);
+        y: root.focusing ? root.pad : root.pad + floor(i / root.cols) * (root.tile-h + root.gap);
+        width: root.focusing ? root.width - 2 * root.pad : root.tile-w;
+        height: root.focusing ? root.height - 2 * root.pad : root.tile-h;
+        tile: tile;
+        focused: self.is-focused;
+        close => { root.close(tile.key); }
+        retry => { root.retry(tile.key); }
+        change-source => { root.change-source(); }
+        toggle-focus => { root.focused = self.is-focused ? "" : tile.key; }
+    }
+}

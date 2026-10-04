@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocol", "crates/server", "crates/media", "crates/app"]
+members = ["crates/protocol", "crates/server", "crates/media", "crates/transport", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 niscord-media = { path = "crates/media" }
 niscord-protocol = { path = "crates/protocol" }
+niscord-transport = { path = "crates/transport" }
 
 anyhow = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

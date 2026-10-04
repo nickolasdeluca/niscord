@@ -1,14 +1,21 @@
 // Hide the console window in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod links;
 mod net;
 mod settings;
 mod share;
 mod thumbnails;
+mod tiles;
+mod watch;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
+
+use niscord_media::pipeline::Snapshot;
 
 use niscord_protocol::{ClientMsg, PeerId, PeerInfo, ServerMsg, ShareKind};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -36,6 +43,14 @@ struct App {
     /// Bumped whenever sharing starts or stops, to drop stale frames.
     share_generation: Cell<u64>,
     stats_timer: slint::Timer,
+    /// WebRTC connections for the current server session.
+    links: RefCell<Option<Arc<links::Links>>>,
+    /// Stage tiles: your stream and the streams you watch.
+    tiles: Rc<VecModel<StreamTile>>,
+    frames: Arc<tiles::FrameMailbox>,
+    /// Last counters per watched stream, for per-second rates.
+    stream_stats: RefCell<HashMap<String, Snapshot>>,
+    viewers_connected: Cell<usize>,
 }
 
 thread_local! {
@@ -84,12 +99,15 @@ impl App {
         let session = net::Session::start(self.rt.handle(), params, move |event| {
             let _ = slint::invoke_from_event_loop(move || with_app(|app| app.on_net_event(generation, event)));
         });
+        self.start_links(session.sender());
         *self.session.borrow_mut() = Some(session);
     }
 
     fn disconnect(&self, error: Option<String>) {
         self.close_picker();
         self.stop_share(None);
+        self.remove_remote_tiles();
+        self.links.borrow_mut().take();
         self.generation.set(self.generation.get() + 1);
         self.session.borrow_mut().take();
         self.my_id.set(None);
@@ -125,6 +143,9 @@ impl App {
         match event {
             net::Event::Joined { id, ice_servers } => {
                 tracing::info!(%id, ice = ice_servers.len(), "joined");
+                if let Some(links) = self.links() {
+                    links.set_ice_servers(ice_servers);
+                }
                 self.my_id.set(Some(id));
                 ui.set_connecting(false);
                 ui.set_connected(true);
@@ -136,7 +157,13 @@ impl App {
             net::Event::Peers(peers) => self.set_peers(peers),
             net::Event::Reconnecting(reason) => {
                 tracing::info!("reconnecting: {reason}");
-                // The old list is stale and its ids are about to change.
+                // The old list is stale and its ids are about to change, so
+                // every peer connection is dead too.
+                if let Some(links) = self.links() {
+                    links.close_all();
+                }
+                self.remove_remote_tiles();
+                self.viewers_connected.set(0);
                 self.my_id.set(None);
                 self.peers.set_vec(Vec::new());
                 ui.set_online(false);
@@ -148,23 +175,21 @@ impl App {
     }
 
     fn on_server_msg(&self, msg: ServerMsg) {
-        match msg {
-            ServerMsg::ShareEnded { from } => {
-                let name = self.peer_name(from);
-                self.show_notice(format!("{name}'s stream ended"));
-            }
-            // Media transport arrives in a later milestone.
-            ServerMsg::WatchRequest { from } => tracing::info!(%from, "watch request"),
-            ServerMsg::ViewerLeft { from } => tracing::info!(%from, "viewer left"),
-            ServerMsg::Signal { from, role, .. } => tracing::debug!(%from, ?role, "signal"),
-            _ => {}
-        }
+        self.on_stream_msg(msg);
     }
 
     fn peer_name(&self, id: PeerId) -> String {
+        self.peer_share(id).0
+    }
+
+    /// Name and share title of a peer, from the latest presence list.
+    fn peer_share(&self, id: PeerId) -> (String, String) {
         use slint::Model;
         let id = SharedString::from(id.to_string());
-        self.peers.iter().find(|p| p.id == id).map_or_else(|| "Someone".into(), |p| p.name.to_string())
+        self.peers
+            .iter()
+            .find(|p| p.id == id)
+            .map_or_else(|| ("Someone".into(), String::new()), |p| (p.name.to_string(), p.share_title.to_string()))
     }
 
     fn set_peers(&self, peers: Vec<PeerInfo>) {
@@ -212,6 +237,8 @@ fn main() -> anyhow::Result<()> {
 
     let peers = Rc::new(VecModel::default());
     ui.set_peers(ModelRc::from(peers.clone()));
+    let tiles = Rc::new(VecModel::default());
+    ui.set_tiles(ModelRc::from(tiles.clone()));
 
     let app = Rc::new(App {
         ui: ui.as_weak(),
@@ -226,6 +253,11 @@ fn main() -> anyhow::Result<()> {
         share: RefCell::new(None),
         share_generation: Cell::new(0),
         stats_timer: slint::Timer::default(),
+        links: RefCell::new(None),
+        tiles,
+        frames: Arc::default(),
+        stream_stats: RefCell::new(HashMap::new()),
+        viewers_connected: Cell::new(0),
     });
     APP.with(|a| *a.borrow_mut() = Some(app));
 
@@ -234,18 +266,19 @@ fn main() -> anyhow::Result<()> {
     ui.on_watch(|id| {
         with_app(|app| {
             if let Some(target) = parse_id(&id) {
-                app.send(ClientMsg::Watch { target });
-                app.show_notice("Watching isn't wired up yet: video arrives in a later milestone");
+                app.watch(target);
             }
         })
     });
     ui.on_unwatch(|id| {
         with_app(|app| {
             if let Some(target) = parse_id(&id) {
-                app.send(ClientMsg::Unwatch { target });
+                app.unwatch(target);
             }
         })
     });
+    ui.on_close_stream(|key| with_app(|app| app.close_stream(&key)));
+    ui.on_retry_stream(|key| with_app(|app| app.retry_stream(&key)));
     ui.on_share(|| with_app(|app| app.open_picker()));
     ui.on_picker_cancel(|| with_app(|app| app.close_picker()));
     ui.on_picker_choose(|key| with_app(|app| app.choose_source(key)));
@@ -258,6 +291,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(app) = a.borrow_mut().take() {
             app.picker.borrow_mut().take();
             app.share.borrow_mut().take();
+            app.links.borrow_mut().take();
             app.session.borrow_mut().take();
         }
     });
