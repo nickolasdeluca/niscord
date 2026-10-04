@@ -1,0 +1,387 @@
+import { AboutSlint, Button, LineEdit, ListView, Palette } from "std-widgets.slint";
+
+export struct PeerItem {
+    id: string,
+    name: string,
+    initial: string,
+    is-me: bool,
+    live: bool,
+    share-title: string,
+    share-is-window: bool,
+    viewer-count: int,
+    // Whether the local user is watching this peer.
+    watching: bool,
+}
+
+component Avatar inherits Rectangle {
+    in property <string> initial;
+    in property <bool> live;
+    width: 36px;
+    height: 36px;
+    border-radius: self.width / 2;
+    background: #5865f2;
+    border-width: root.live ? 2px : 0px;
+    border-color: #ed4245;
+    Text {
+        text: root.initial;
+        color: white;
+        font-weight: 700;
+        font-size: 16px;
+    }
+}
+
+component LiveBadge inherits Rectangle {
+    background: #ed4245;
+    border-radius: 3px;
+    width: label.preferred-width + 8px;
+    height: label.preferred-height + 2px;
+    label := Text {
+        text: "LIVE";
+        color: white;
+        font-size: 10px;
+        font-weight: 800;
+    }
+}
+
+component PeerRow inherits Rectangle {
+    in property <PeerItem> peer;
+    callback watch();
+    callback unwatch();
+
+    height: layout.preferred-height;
+    border-radius: 6px;
+    background: touch.has-hover ? Palette.alternate-background.brighter(0.15) : transparent;
+    touch := TouchArea { }
+
+    layout := HorizontalLayout {
+        padding: 8px;
+        spacing: 10px;
+        Avatar {
+            initial: root.peer.initial;
+            live: root.peer.live;
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.peer.name;
+                    font-weight: 600;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if root.peer.is-me: Text {
+                    text: "(you)";
+                    color: Palette.foreground.transparentize(0.5);
+                }
+                if root.peer.live: LiveBadge { }
+            }
+            if root.peer.live: HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: (root.peer.share-is-window ? "Window: " : "Screen: ") + root.peer.share-title;
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.4);
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if root.peer.viewer-count > 0: Text {
+                    text: root.peer.viewer-count + " watching";
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.4);
+                }
+            }
+        }
+        if root.peer.live && !root.peer.is-me: Button {
+            text: root.peer.watching ? "Stop" : "Watch";
+            primary: !root.peer.watching;
+            clicked => {
+                if root.peer.watching {
+                    root.unwatch();
+                } else {
+                    root.watch();
+                }
+            }
+        }
+    }
+}
+
+component ConnectScreen inherits Rectangle {
+    in-out property <string> server-url;
+    in-out property <string> display-name;
+    in-out property <string> password;
+    in property <bool> connecting;
+    in property <string> error;
+    callback connect();
+    callback about();
+
+    init => {
+        server-edit.focus();
+    }
+
+    VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 380px;
+                background: Palette.alternate-background;
+                border-radius: 10px;
+                VerticalLayout {
+                    padding: 28px;
+                    spacing: 10px;
+                    Text {
+                        text: "Niscord";
+                        font-size: 28px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "Share your screen with friends";
+                        horizontal-alignment: center;
+                        color: Palette.foreground.transparentize(0.4);
+                    }
+                    Rectangle { height: 8px; }
+                    Text { text: "Server"; font-size: 12px; }
+                    server-edit := LineEdit {
+                        text <=> root.server-url;
+                        placeholder-text: "ws://your-server:8080";
+                        enabled: !root.connecting;
+                        accepted => { root.connect(); }
+                    }
+                    Text { text: "Display name"; font-size: 12px; }
+                    LineEdit {
+                        text <=> root.display-name;
+                        placeholder-text: "How friends will see you";
+                        enabled: !root.connecting;
+                        accepted => { root.connect(); }
+                    }
+                    Text { text: "Server password"; font-size: 12px; }
+                    LineEdit {
+                        text <=> root.password;
+                        input-type: InputType.password;
+                        placeholder-text: "Leave empty if none";
+                        enabled: !root.connecting;
+                        accepted => { root.connect(); }
+                    }
+                    if root.error != "": Text {
+                        text: root.error;
+                        color: #ed4245;
+                        wrap: word-wrap;
+                    }
+                    Rectangle { height: 4px; }
+                    Button {
+                        text: root.connecting ? "Connecting…" : "Connect";
+                        primary: true;
+                        enabled: !root.connecting;
+                        clicked => { root.connect(); }
+                    }
+                    Button {
+                        text: "About";
+                        clicked => { root.about(); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component MainScreen inherits Rectangle {
+    in property <[PeerItem]> peers;
+    in property <string> my-name;
+    in property <bool> online;
+    in property <string> status-text;
+    callback watch(string);
+    callback unwatch(string);
+    callback share();
+    callback disconnect();
+    callback about();
+
+    HorizontalLayout {
+        // Sidebar: who is online.
+        Rectangle {
+            width: 300px;
+            background: Palette.alternate-background;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+                Text {
+                    text: "ONLINE — " + root.peers.length;
+                    font-size: 12px;
+                    font-weight: 700;
+                    color: Palette.foreground.transparentize(0.4);
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    for peer in root.peers: PeerRow {
+                        peer: peer;
+                        watch => { root.watch(peer.id); }
+                        unwatch => { root.unwatch(peer.id); }
+                    }
+                }
+                // Local user panel.
+                Rectangle {
+                    background: Palette.background.darker(0.1);
+                    border-radius: 8px;
+                    height: panel.preferred-height;
+                    panel := VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 5px;
+                                background: root.online ? #3ba55d : #faa61a;
+                            }
+                            VerticalLayout {
+                                Text { text: root.my-name; font-weight: 600; overflow: elide; }
+                                Text {
+                                    text: root.status-text;
+                                    font-size: 11px;
+                                    color: Palette.foreground.transparentize(0.4);
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button {
+                                text: "Share screen";
+                                primary: true;
+                                horizontal-stretch: 1;
+                                enabled: root.online;
+                                clicked => { root.share(); }
+                            }
+                            Button {
+                                text: "Leave";
+                                clicked => { root.disconnect(); }
+                            }
+                        }
+                        Button {
+                            text: "About";
+                            clicked => { root.about(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Stage: streams being watched.
+        Rectangle {
+            horizontal-stretch: 1;
+            VerticalLayout {
+                alignment: center;
+                spacing: 6px;
+                Text {
+                    text: "Nobody's stream is open";
+                    font-size: 20px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Click Watch next to someone who is LIVE.";
+                    horizontal-alignment: center;
+                    color: Palette.foreground.transparentize(0.4);
+                }
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Niscord";
+    preferred-width: 1100px;
+    preferred-height: 680px;
+    min-width: 720px;
+    min-height: 480px;
+
+    // Connect form.
+    in-out property <string> server-url;
+    in-out property <string> display-name;
+    in-out property <string> password;
+    in property <bool> connecting;
+    in property <string> connect-error;
+
+    // Session.
+    in property <bool> connected;
+    in property <bool> online;
+    in property <string> status-text;
+    in property <string> my-name;
+    in property <[PeerItem]> peers;
+    in property <string> notice;
+
+    callback connect();
+    callback disconnect();
+    callback watch(string);
+    callback unwatch(string);
+    callback share();
+
+    about-popup := PopupWindow {
+        x: (root.width - 360px) / 2;
+        y: (root.height - 300px) / 2;
+        width: 360px;
+        height: 300px;
+        Rectangle {
+            background: Palette.alternate-background;
+            border-radius: 10px;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+                Text {
+                    text: "Niscord";
+                    font-size: 20px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Private screen sharing for friends.";
+                    horizontal-alignment: center;
+                }
+                AboutSlint { }
+            }
+        }
+    }
+
+    if !root.connected: ConnectScreen {
+        server-url <=> root.server-url;
+        display-name <=> root.display-name;
+        password <=> root.password;
+        connecting: root.connecting;
+        error: root.connect-error;
+        connect => { root.connect(); }
+        about => { about-popup.show(); }
+    }
+
+    if root.connected: MainScreen {
+        peers: root.peers;
+        my-name: root.my-name;
+        online: root.online;
+        status-text: root.status-text;
+        watch(id) => { root.watch(id); }
+        unwatch(id) => { root.unwatch(id); }
+        share => { root.share(); }
+        disconnect => { root.disconnect(); }
+        about => { about-popup.show(); }
+    }
+
+    // Transient message banner (e.g. "coming soon", "stream ended").
+    if root.notice != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: 16px;
+        width: notice-text.preferred-width + 32px;
+        height: notice-text.preferred-height + 16px;
+        background: #202225;
+        border-radius: 8px;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000080;
+        notice-text := Text {
+            text: root.notice;
+            color: white;
+        }
+    }
+}
