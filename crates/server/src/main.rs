@@ -49,9 +49,30 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::select! {
         res = niscord_server::run(listener, config) => res,
-        _ = tokio::signal::ctrl_c() => {
+        _ = shutdown_signal() => {
             tracing::info!("shutting down");
             Ok(())
         }
+    }
+}
+
+/// Ctrl+C, or SIGTERM from systemd/Docker on Unix.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            },
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }

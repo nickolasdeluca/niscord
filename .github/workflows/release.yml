@@ -1,0 +1,76 @@
+name: Release
+
+# Push a tag like v0.1.0 to build and publish a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Set the repository variable NISCORD_DEFAULT_SERVER (Settings > Secrets and
+# variables > Actions > Variables), e.g. wss://niscord.example.com, so the
+# app comes with your server filled in.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows app and server
+    runs-on: windows-latest
+    env:
+      NISCORD_DEFAULT_SERVER: ${{ vars.NISCORD_DEFAULT_SERVER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/setup-nasm@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked -p niscord -p niscord-server
+      - name: Collect files
+        shell: bash
+        run: |
+          mkdir dist
+          cp target/release/niscord.exe dist/niscord.exe
+          cp target/release/niscord-server.exe dist/niscord-server-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  server-linux:
+    name: Linux server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get install -y musl-tools
+      # Static (musl), so it runs on any x86_64 Linux distribution.
+      - run: cargo build --release --locked -p niscord-server --target x86_64-unknown-linux-musl
+      - run: |
+          mkdir dist
+          cp target/x86_64-unknown-linux-musl/release/niscord-server dist/niscord-server-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  publish:
+    name: Publish release
+    needs: [windows, server-linux]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Niscord $GITHUB_REF_NAME" --generate-notes

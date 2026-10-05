@@ -305,6 +305,8 @@ component MainScreen inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "Niscord";
+    icon: @image-url("../assets/icon.png");
+    in property <string> version;
     preferred-width: 1100px;
     preferred-height: 680px;
     min-width: 720px;
@@ -371,6 +373,11 @@ export component AppWindow inherits Window {
                 Text {
                     text: "Private screen sharing for friends.";
                     horizontal-alignment: center;
+                }
+                Text {
+                    text: "Version " + root.version;
+                    horizontal-alignment: center;
+                    color: Palette.foreground.transparentize(0.4);
                 }
                 AboutSlint { }
             }

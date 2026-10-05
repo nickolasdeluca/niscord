@@ -19,7 +19,7 @@ NAT), media is relayed through a TURN server you also host.
 | 4. WebRTC between friends: Watch shows the live stream, bitrate follows the network | ✅ done |
 | 5. Audio: a window shares its app's sound, a screen shares everything but Niscord; Opus | ✅ done |
 | 6. Quality: GPU encoding (NVIDIA/AMD/Intel) with software fallback, bitrate adaptation, keyframe recovery | ✅ done |
-| 7. Packaging: portable `.exe`, server release binaries | ⏳ next |
+| 7. Packaging: self-contained `.exe`, Ubuntu install script, release builds | ✅ done |
 
 ## Layout
 
@@ -32,6 +32,8 @@ crates/
   transport/  WebRTC (webrtc-rs): one connection per sharer/viewer pair, H.264 + Opus tracks
   server/     signaling server (presence, watch requests, WebRTC signaling relay)
   app/        the Slint desktop app (`niscord.exe`)
+deploy/       Ubuntu server install script and systemd unit
+.github/      CI (fmt, clippy, tests) and tagged release builds
 ```
 
 ## Development
@@ -118,7 +120,39 @@ the same machine flows either way, so these prompts can be cancelled safely. To 
 debug build on loopback only, set `NISCORD_UDP_ADDR=127.0.0.1:0` (and run the server with
 `NISCORD_BIND=127.0.0.1:8080`).
 
-## Running the server
+## Hosting the server
+
+### On an Ubuntu/Debian VPS
+
+`deploy/install.sh` sets up everything on a fresh VPS: the Niscord server as a systemd
+service, [Caddy](https://caddyserver.com) for `wss://` with a Let's Encrypt certificate,
+and [coturn](https://github.com/coturn/coturn) for STUN/TURN. It builds the server from
+source, so it only needs a copy of this repository.
+
+1. Point a DNS `A` record for your domain (e.g. `niscord.example.com`) at the VPS.
+2. Allow these in your VPS provider's firewall: TCP 80 and 443, UDP 3478,
+   UDP 49160-49200. (The script opens them in `ufw` itself if it is active.)
+3. Copy the source over and run the script:
+
+   ```sh
+   # On your PC, from the repository:
+   git archive --format=tar.gz -o niscord.tar.gz HEAD
+   scp niscord.tar.gz you@your-vps:
+
+   # On the VPS:
+   mkdir niscord && tar -xzf niscord.tar.gz -C niscord && cd niscord
+   sudo deploy/install.sh --domain niscord.example.com
+   ```
+
+It prints the server address (`wss://niscord.example.com`) and a generated password
+for your friends; pass `--password` to choose your own. To update later, copy the new
+source and run the script again: it keeps the password and TURN secret. With a
+release binary instead of building, pass `--binary ./niscord-server-linux-x86_64`.
+
+Settings live in `/etc/niscord/niscord.env` (`sudo systemctl restart niscord-server`
+after editing); logs with `journalctl -u niscord-server -f`.
+
+### Configuration
 
 The server is a single binary configured through environment variables:
 
@@ -127,7 +161,7 @@ The server is a single binary configured through environment variables:
 | `NISCORD_BIND` | `0.0.0.0:8080` | Address to listen on |
 | `NISCORD_PASSWORD` | *(empty)* | Shared password to join. **Set this**, or anyone who finds the server can join |
 | `NISCORD_STUN_URLS` | `stun:stun.l.google.com:19302` | Comma-separated STUN URLs |
-| `NISCORD_TURN_URLS` | *(empty)* | Comma-separated TURN URLs, e.g. `turn:turn.example.com:3478,turns:turn.example.com:5349` |
+| `NISCORD_TURN_URLS` | *(empty)* | Comma-separated TURN URLs, e.g. `turn:turn.example.com:3478?transport=udp` |
 | `NISCORD_TURN_SECRET` | *(empty)* | coturn `static-auth-secret`; clients get short-lived credentials derived from it |
 | `NISCORD_TURN_TTL_SECONDS` | `43200` | Lifetime of those credentials |
 | `RUST_LOG` | `info` | Log verbosity |
@@ -137,49 +171,46 @@ cargo build --release -p niscord-server
 NISCORD_PASSWORD=change-me ./target/release/niscord-server
 ```
 
-**TLS:** the server speaks plain `ws://`. To use `wss://`, put it behind a reverse
-proxy. With Caddy, for example:
-
-```
-niscord.example.com {
-    reverse_proxy 127.0.0.1:8080
-}
-```
-
-### TURN (strongly recommended)
-
-Many home connections (especially mobile and CGNAT ISPs) can't accept direct peer
-connections. Install [coturn](https://github.com/coturn/coturn) and give it a config
-like:
-
-```
-listening-port=3478
-realm=niscord.example.com
-use-auth-secret
-static-auth-secret=<long random string, same as NISCORD_TURN_SECRET>
-# Relay ports: open these (UDP) in the firewall.
-min-port=49160
-max-port=49200
-no-cli
-```
-
-Then start the server with `NISCORD_TURN_URLS=turn:niscord.example.com:3478` and
-`NISCORD_TURN_SECRET=<same secret>`.
+The server speaks plain `ws://`; put it behind a TLS reverse proxy for `wss://` (the
+install script uses Caddy). TURN matters: many home connections (mobile, CGNAT) can't
+accept direct peer connections, and then video only flows through the relay. Niscord
+uses TURN over UDP only. See `deploy/install.sh` for a working coturn configuration.
 
 ## Distributing the app
 
-Bake your server address into the build so friends only need a name and the password:
+### Releases
+
+Pushing a tag builds everything on GitHub Actions and publishes a release with
+`niscord.exe`, the Windows and Linux (x86_64, static) server binaries and checksums:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Set the repository variable `NISCORD_DEFAULT_SERVER` (Settings → Secrets and variables
+→ Actions → Variables) to your server, e.g. `wss://niscord.example.com`, so the app
+comes with it filled in. Friends need to be able to download the release: on a
+private repository only collaborators can.
+
+### Building it yourself
 
 ```sh
 NISCORD_DEFAULT_SERVER=wss://niscord.example.com cargo build --release -p niscord
 ```
 
-Share `target/release/niscord.exe`. It needs no installer or runtime. The first time a
-friend watches or shares, Windows Firewall asks whether Niscord may use the network:
-they should allow it (private networks is enough), or direct connections between
-friends will fail and everything will have to go through TURN. The app remembers
-the server, name and password in `%APPDATA%\Niscord\settings.json` (the password is
-stored in plain text).
+### For your friends
+
+`niscord.exe` is a single file with no installer and no runtime to install (the C
+runtime is linked in). It needs Windows 10 version 2004 or later (Windows 11 is best:
+it hides the capture border). The first time a friend watches or shares, Windows
+Firewall asks whether Niscord may use the network: they should allow it (private
+networks is enough), or direct connections between friends will fail and everything
+will have to go through TURN.
+
+The app keeps its settings in `%APPDATA%\Niscord\settings.json` (the password is
+stored in plain text) and its log in `%APPDATA%\Niscord\niscord.log` (the previous
+run's in `niscord.old.log`). If something goes wrong, that log is what to send.
 
 ## License notes
 

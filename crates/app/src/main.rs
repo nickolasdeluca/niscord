@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod links;
+mod logging;
 mod net;
 mod settings;
 mod share;
@@ -19,7 +20,6 @@ use niscord_media::pipeline::Snapshot;
 
 use niscord_protocol::{ClientMsg, PeerId, PeerInfo, ServerMsg, ShareKind};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
-use tracing_subscriber::EnvFilter;
 
 use crate::settings::Settings;
 
@@ -223,12 +223,11 @@ fn parse_id(id: &str) -> Option<PeerId> {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .init();
+    logging::init();
 
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     let ui = AppWindow::new()?;
+    ui.set_version(env!("CARGO_PKG_VERSION").into());
 
     let settings = Settings::load();
     ui.set_server_url(settings.server_url.into());

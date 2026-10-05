@@ -1,0 +1,30 @@
+[Unit]
+Description=Niscord signaling server
+Documentation=https://github.com/nickolasdeluca/niscord
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/niscord-server
+# NISCORD_PASSWORD, NISCORD_TURN_* and friends (see README).
+EnvironmentFile=/etc/niscord/niscord.env
+Restart=on-failure
+RestartSec=2
+
+# It only needs to accept connections on localhost (Caddy fronts it).
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
