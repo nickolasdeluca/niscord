@@ -17,6 +17,8 @@ export struct StreamTile {
     // Playback volume 0..1, and mute (which keeps the volume).
     volume: float,
     muted: bool,
+    // Shown in its own window instead of on the stage.
+    popped: bool,
 }
 
 component LiveBadge inherits Rectangle {
@@ -32,18 +34,46 @@ component LiveBadge inherits Rectangle {
     }
 }
 
-component Tile inherits Rectangle {
+// Small translucent button for controls drawn over the video.
+component TileButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> danger;
+    callback clicked();
+
+    height: 26px;
+    width: label.preferred-width + 18px;
+    border-radius: 5px;
+    background: touch.pressed ? #ffffff40 : touch.has-hover ? (root.danger ? #ed4245c0 : #ffffff30) : #000000a0;
+    label := Text {
+        text: root.text;
+        color: white;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// One stream: on the stage, or filling a pop-out window (`popped`).
+export component Tile inherits Rectangle {
     in property <StreamTile> tile;
+    // On the stage: this tile fills it. Popped out: the window is full screen.
     in property <bool> focused;
+    in property <bool> popped;
     callback close();
     callback retry();
     callback change-source();
     callback toggle-focus();
+    callback pop-out();
+    callback pop-in();
+    callback hide-preview();
     callback set-volume(float);
     callback toggle-mute();
 
     background: black;
-    border-radius: 8px;
+    border-radius: root.popped ? 0px : 8px;
     clip: true;
 
     if root.tile.has-frame: Image {
@@ -71,7 +101,8 @@ component Tile inherits Rectangle {
         }
     }
 
-    // Double-click to focus one stream / go back to the grid.
+    // Double-click: focus one stream / go back to the grid (full screen
+    // when popped out).
     TouchArea {
         double-clicked => { root.toggle-focus(); }
     }
@@ -85,36 +116,52 @@ component Tile inherits Rectangle {
         background: #000000a0;
         border-radius: 6px;
         caption := HorizontalLayout {
-            padding: 6px;
+            padding: 5px;
             spacing: 6px;
             LiveBadge { }
             Text {
                 text: root.tile.name + (root.tile.title != "" ? " · " + root.tile.title : "");
                 color: white;
                 font-weight: 600;
-                max-width: max(80px, root.width - 260px);
+                font-size: 12px;
+                max-width: max(60px, root.width - actions.preferred-width - 50px);
                 overflow: elide;
             }
         }
     }
 
     // Actions.
-    HorizontalLayout {
+    actions := HorizontalLayout {
         x: parent.width - self.preferred-width - 10px;
         y: 10px;
         width: self.preferred-width;
         height: self.preferred-height;
-        spacing: 6px;
-        Button {
-            text: root.focused ? "Show all" : "Focus";
+        spacing: 4px;
+        TileButton {
+            text: root.popped ? "Pop in" : "Pop out";
+            clicked => {
+                if root.popped {
+                    root.pop-in();
+                } else {
+                    root.pop-out();
+                }
+            }
+        }
+        TileButton {
+            text: root.popped ? (root.focused ? "Exit full screen" : "Full screen") : (root.focused ? "Show all" : "Focus");
             clicked => { root.toggle-focus(); }
         }
-        if root.tile.is-self: Button {
+        if root.tile.is-self: TileButton {
             text: "Change";
             clicked => { root.change-source(); }
         }
-        Button {
+        if root.tile.is-self: TileButton {
+            text: "Hide";
+            clicked => { root.hide-preview(); }
+        }
+        TileButton {
             text: root.tile.is-self ? "Stop sharing" : "Close";
+            danger: true;
             clicked => { root.close(); }
         }
     }
@@ -130,7 +177,7 @@ component Tile inherits Rectangle {
         audio := HorizontalLayout {
             padding: 4px;
             spacing: 4px;
-            Button {
+            TileButton {
                 text: root.tile.muted ? "Unmute" : "Mute";
                 clicked => { root.toggle-mute(); }
             }
@@ -163,13 +210,17 @@ component Tile inherits Rectangle {
 }
 
 // Your stream preview plus every stream you watch, in a grid; one can be
-// focused to fill the stage.
+// focused to fill the stage. Popped-out tiles are filtered out beforehand.
 export component Stage inherits Rectangle {
     in property <[StreamTile]> tiles;
     in-out property <string> focused;
+    // Some streams are open, just all in their own windows.
+    in property <int> popped-count;
     callback close(string);
     callback retry(string);
     callback change-source();
+    callback pop-out(string);
+    callback hide-preview();
     callback set-volume(string, float);
     callback toggle-mute(string);
 
@@ -186,13 +237,13 @@ export component Stage inherits Rectangle {
         alignment: center;
         spacing: 6px;
         Text {
-            text: "Nobody's stream is open";
+            text: root.popped-count > 0 ? "Streams are open in their own windows" : "Nobody's stream is open";
             font-size: 20px;
             font-weight: 700;
             horizontal-alignment: center;
         }
         Text {
-            text: "Click Watch next to someone who is LIVE, or share your screen.";
+            text: root.popped-count > 0 ? "Use Pop in (or close the window) to bring one back here." : "Click Watch next to someone who is LIVE, or share your screen.";
             horizontal-alignment: center;
             color: Palette.foreground.transparentize(0.4);
         }
@@ -210,6 +261,8 @@ export component Stage inherits Rectangle {
         close => { root.close(tile.key); }
         retry => { root.retry(tile.key); }
         change-source => { root.change-source(); }
+        pop-out => { root.pop-out(tile.key); }
+        hide-preview => { root.hide-preview(); }
         set-volume(value) => { root.set-volume(tile.key, value); }
         toggle-mute => { root.toggle-mute(tile.key); }
         toggle-focus => { root.focused = self.is-focused ? "" : tile.key; }

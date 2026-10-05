@@ -1,9 +1,12 @@
 // Hide the console window in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod hotkey;
 mod links;
 mod logging;
 mod net;
+mod options;
+mod popout;
 mod settings;
 mod share;
 mod thumbnails;
@@ -19,7 +22,7 @@ use std::time::Duration;
 use niscord_media::pipeline::Snapshot;
 
 use niscord_protocol::{ClientMsg, PeerId, PeerInfo, ServerMsg, ShareKind};
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{CloseRequestResponse, ComponentHandle, ModelExt, ModelRc, SharedString, VecModel};
 
 use crate::settings::Settings;
 
@@ -51,6 +54,15 @@ struct App {
     /// Last counters per watched stream, for per-second rates.
     stream_stats: RefCell<HashMap<String, Snapshot>>,
     viewers_connected: Cell<usize>,
+    /// Streams popped out into their own windows, by tile key.
+    popouts: RefCell<HashMap<String, StreamWindow>>,
+    /// Whether to show (and decode) your own preview; read by the encoder thread.
+    preview: Arc<std::sync::atomic::AtomicBool>,
+    shortcut: Cell<Option<hotkey::Shortcut>>,
+    #[cfg(windows)]
+    hotkey: RefCell<Option<hotkey::HotkeyListener>>,
+    #[cfg(not(windows))]
+    hotkey: RefCell<Option<()>>,
 }
 
 thread_local! {
@@ -233,11 +245,14 @@ fn main() -> anyhow::Result<()> {
     ui.set_server_url(settings.server_url.into());
     ui.set_display_name(settings.name.into());
     ui.set_password(settings.password.into());
+    ui.set_preview_hidden(settings.hide_preview);
+    ui.set_show_preview(!settings.hide_preview);
 
     let peers = Rc::new(VecModel::default());
     ui.set_peers(ModelRc::from(peers.clone()));
     let tiles = Rc::new(VecModel::default());
-    ui.set_tiles(ModelRc::from(tiles.clone()));
+    // Popped-out streams live in their own windows, not on the stage.
+    ui.set_tiles(ModelRc::new(tiles.clone().filter(|tile: &StreamTile| !tile.popped)));
 
     let app = Rc::new(App {
         ui: ui.as_weak(),
@@ -257,8 +272,13 @@ fn main() -> anyhow::Result<()> {
         frames: Arc::default(),
         stream_stats: RefCell::new(HashMap::new()),
         viewers_connected: Cell::new(0),
+        popouts: RefCell::new(HashMap::new()),
+        preview: Arc::new(std::sync::atomic::AtomicBool::new(!settings.hide_preview)),
+        shortcut: Cell::new(None),
+        hotkey: RefCell::new(None),
     });
     APP.with(|a| *a.borrow_mut() = Some(app));
+    with_app(|app| app.init_shortcut());
 
     ui.on_connect(|| with_app(|app| app.connect()));
     ui.on_disconnect(|| with_app(|app| app.disconnect(None)));
@@ -284,6 +304,20 @@ fn main() -> anyhow::Result<()> {
     ui.on_picker_cancel(|| with_app(|app| app.close_picker()));
     ui.on_picker_choose(|key| with_app(|app| app.choose_source(key)));
     ui.on_stop_share(|| with_app(|app| app.stop_share(None)));
+    ui.on_pop_out(|key| with_app(|app| app.pop_out(&key)));
+    ui.on_set_preview_hidden(|hidden| with_app(|app| app.set_preview_hidden(hidden)));
+    ui.on_open_settings(|| with_app(|app| app.open_settings()));
+    ui.on_close_settings(|| with_app(|app| app.close_settings()));
+    ui.on_record_shortcut(|| with_app(|app| app.record_shortcut()));
+    ui.on_shortcut_key(|typed| with_app(|app| app.shortcut_key(&typed)));
+    ui.on_cancel_recording(|| with_app(|app| app.cancel_recording()));
+    ui.on_clear_shortcut(|| with_app(|app| app.clear_shortcut()));
+    // Pop-out windows close with the main window (otherwise the app would
+    // keep running without it).
+    ui.window().on_close_requested(|| {
+        with_app(|app| app.close_all_popouts());
+        CloseRequestResponse::HideWindow
+    });
 
     ui.run()?;
 
@@ -291,6 +325,8 @@ fn main() -> anyhow::Result<()> {
     APP.with(|a| {
         if let Some(app) = a.borrow_mut().take() {
             app.picker.borrow_mut().take();
+            app.hotkey.borrow_mut().take();
+            app.close_all_popouts();
             app.share.borrow_mut().take();
             app.links.borrow_mut().take();
             app.session.borrow_mut().take();

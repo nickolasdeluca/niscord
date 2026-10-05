@@ -46,6 +46,10 @@ pub struct Settings {
     pub resolution: Resolution,
     pub fps: u32,
     pub share_audio: bool,
+    /// Keep streaming but don't show (or decode) your own preview.
+    pub hide_preview: bool,
+    /// Go-live shortcut, e.g. "Ctrl+Alt+S"; empty for none.
+    pub shortcut: String,
 }
 
 impl Default for Settings {
@@ -57,6 +61,8 @@ impl Default for Settings {
             resolution: Resolution::default(),
             fps: 30,
             share_audio: true,
+            hide_preview: false,
+            shortcut: String::new(),
         }
     }
 }

@@ -95,6 +95,15 @@ pub fn list_sources() -> Vec<Source> {
     Vec::new()
 }
 
+/// The window in front of the user, if it can be shared (not Niscord's own,
+/// not the desktop, not minimized).
+pub fn foreground_window() -> Option<Source> {
+    #[cfg(windows)]
+    return windows::foreground_window();
+    #[cfg(not(windows))]
+    None
+}
+
 /// Whether captures can run without Windows drawing a yellow border around
 /// the source (Windows 11 and later). When false, every capture flashes a
 /// border, so callers should avoid frequent one-shot captures.

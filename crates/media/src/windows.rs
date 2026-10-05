@@ -46,41 +46,50 @@ pub fn list_sources() -> Vec<Source> {
         });
     }
 
-    let own_pid = std::process::id();
-    for window in Window::enumerate().unwrap_or_default() {
-        let process_id = window.process_id().ok();
-        if process_id == Some(own_pid) || is_cloaked(&window) {
-            continue;
-        }
-        let Ok(title) = window.title() else { continue };
-        let title = title.trim().to_owned();
-        if title.is_empty() {
-            continue;
-        }
-        let process = window.process_name().unwrap_or_default();
-        // The desktop itself shows up as a window.
-        if title == "Program Manager" && process.eq_ignore_ascii_case("explorer.exe") {
-            continue;
-        }
-        let width = window.width().unwrap_or(0).max(0) as u32;
-        let height = window.height().unwrap_or(0).max(0) as u32;
-        let minimized = unsafe { IsIconic(HWND(window.as_raw_hwnd())).as_bool() };
-        if !minimized && (width < 16 || height < 16) {
-            continue;
-        }
-        sources.push(Source {
-            id: SourceId::Window(window.as_raw_hwnd() as isize),
-            kind: SourceKind::Window,
-            title,
-            detail: process,
-            width,
-            height,
-            primary: false,
-            minimized,
-            process_id,
-        });
-    }
+    sources.extend(Window::enumerate().unwrap_or_default().iter().filter_map(window_source));
     sources
+}
+
+/// The window in front, if it is one that can be shared.
+pub fn foreground_window() -> Option<Source> {
+    let window = Window::foreground().ok()?;
+    window_source(&window).filter(|source| !source.minimized)
+}
+
+/// Describe a window as a share source, or `None` for windows that make no
+/// sense to share: Niscord's own, invisible, untitled or tiny ones, and the
+/// desktop.
+fn window_source(window: &Window) -> Option<Source> {
+    let process_id = window.process_id().ok();
+    if process_id == Some(std::process::id()) || is_cloaked(window) {
+        return None;
+    }
+    let title = window.title().ok()?.trim().to_owned();
+    if title.is_empty() {
+        return None;
+    }
+    let process = window.process_name().unwrap_or_default();
+    // The desktop itself shows up as a window.
+    if title == "Program Manager" && process.eq_ignore_ascii_case("explorer.exe") {
+        return None;
+    }
+    let width = window.width().unwrap_or(0).max(0) as u32;
+    let height = window.height().unwrap_or(0).max(0) as u32;
+    let minimized = unsafe { IsIconic(HWND(window.as_raw_hwnd())).as_bool() };
+    if !minimized && (width < 16 || height < 16) {
+        return None;
+    }
+    Some(Source {
+        id: SourceId::Window(window.as_raw_hwnd() as isize),
+        kind: SourceKind::Window,
+        title,
+        detail: process,
+        width,
+        height,
+        primary: false,
+        minimized,
+        process_id,
+    })
 }
 
 /// Cloaked windows are invisible to the user: suspended UWP apps, windows on

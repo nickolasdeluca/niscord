@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use niscord_media::RgbaImage;
 use niscord_media::audio::{DEFAULT_BITRATE, FRAME_LEN, OpusEncoder};
-use niscord_media::video::{EncoderSettings, VideoEncoder};
+use niscord_media::video::{EncoderPreference, EncoderSettings, VideoEncoder};
 use niscord_protocol::{ServerMsg, ShareKind};
 use tokio::sync::mpsc;
 
@@ -111,7 +111,10 @@ async fn watch_stream_through_server() {
 
     // Ana streams ~2 s of video and audio through her Links.
     let mut opus = OpusEncoder::new(DEFAULT_BITRATE).unwrap();
-    let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 1_000_000 }).unwrap();
+    // Software: deterministic (a GPU encoder may hand a frame out one call late).
+    let mut encoder =
+        VideoEncoder::with_preference(EncoderSettings { fps: 30, bitrate_bps: 1_000_000 }, EncoderPreference::Software)
+            .unwrap();
     let sent = 60;
     for t in 0..sent {
         if let Some(frame) = encoder.encode(&picture(t), t as u64 * 33).unwrap() {

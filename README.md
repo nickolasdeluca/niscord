@@ -21,6 +21,20 @@ NAT), media is relayed through a TURN server you also host.
 | 6. Quality: GPU encoding (NVIDIA/AMD/Intel) with software fallback, bitrate adaptation, keyframe recovery | ✅ done |
 | 7. Packaging: self-contained `.exe`, Ubuntu install script, release builds | ✅ done |
 
+## Using it
+
+- **Go live:** *Share screen*, pick a screen or window, quality and whether to share
+  its sound. Friends see you as LIVE and click *Watch*.
+- **Go-live shortcut:** set one in *Settings* (e.g. Ctrl+Alt+S). It works from any
+  app: it shares the window in front, and pressing it again on that window stops.
+- **Pop out:** any stream (yours too) can move to its own window with *Pop out*.
+  Double-click it or press F11 for full screen, Esc to leave full screen; *Pop in* or
+  closing the window puts it back.
+- **Hide your preview:** *Hide* on your own tile (or the checkbox in *Settings*) keeps
+  you streaming without showing, or decoding, your own picture. It's remembered;
+  *Show my preview* in the sidebar brings it back.
+- Each stream you watch has its own mute and volume.
+
 ## Layout
 
 ```

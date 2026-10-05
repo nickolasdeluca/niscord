@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use niscord_media::RgbaImage;
 use niscord_media::audio::{DEFAULT_BITRATE, FRAME_DURATION, FRAME_LEN, OpusDecoder, OpusEncoder};
-use niscord_media::video::{EncoderSettings, VideoDecoder, VideoEncoder};
+use niscord_media::video::{EncoderPreference, EncoderSettings, VideoDecoder, VideoEncoder};
 use niscord_transport::{
     BitrateLimits, IncomingEvents, IncomingPeer, OutgoingEvents, OutgoingPeer, PeerEvents, PeerState, SignalData,
     TransportConfig,
@@ -122,7 +122,10 @@ async fn video_flows_from_sharer_to_viewer() {
     // Stream ~2 s of 30 fps video, honouring keyframe requests, with audio
     // alongside (a 20 ms Opus packet per frame is enough to prove it flows).
     let mut opus = OpusEncoder::new(DEFAULT_BITRATE).unwrap();
-    let mut encoder = VideoEncoder::new(EncoderSettings { fps: 30, bitrate_bps: 1_000_000 }).unwrap();
+    // Software: deterministic (a GPU encoder may hand a frame out one call late).
+    let mut encoder =
+        VideoEncoder::with_preference(EncoderSettings { fps: 30, bitrate_bps: 1_000_000 }, EncoderPreference::Software)
+            .unwrap();
     let mut answered = 0;
     let sent = 60;
     let mut sent_at = Vec::new();

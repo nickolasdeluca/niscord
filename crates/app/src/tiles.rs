@@ -56,9 +56,14 @@ impl App {
 
     /// Add a tile, or replace the one with the same key. Your own stream
     /// always comes first.
-    pub fn upsert_tile(&self, tile: StreamTile) {
+    pub fn upsert_tile(&self, mut tile: StreamTile) {
         match self.tile_row(&tile.key) {
-            Some(row) => self.tiles.set_row_data(row, tile),
+            Some(row) => {
+                // A replaced tile (e.g. a new source) stays where it was shown.
+                tile.popped = self.tiles.row_data(row).is_some_and(|old| old.popped);
+                self.sync_popout(&tile);
+                self.tiles.set_row_data(row, tile);
+            }
             None if tile.is_self => self.tiles.insert(0, tile),
             None => self.tiles.push(tile),
         }
@@ -69,11 +74,13 @@ impl App {
         if let Some(row) = self.tile_row(key) {
             let mut tile = self.tiles.row_data(row).unwrap();
             f(&mut tile);
+            self.sync_popout(&tile);
             self.tiles.set_row_data(row, tile);
         }
     }
 
     pub fn remove_tile(&self, key: &str) {
+        self.close_popout(key);
         if let Some(row) = self.tile_row(key) {
             self.tiles.remove(row);
         }
@@ -142,5 +149,6 @@ pub fn new_tile(key: impl Into<slint::SharedString>, name: &str, title: &str, is
         has_audio: false,
         volume: 1.0,
         muted: false,
+        popped: false,
     }
 }

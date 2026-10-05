@@ -1,0 +1,127 @@
+import { Button, CheckBox, Palette } from "std-widgets.slint";
+
+// App settings: the go-live shortcut and whether to show your own preview.
+export component SettingsDialog inherits Rectangle {
+    // "Ctrl+Alt+S", or empty when no shortcut is set.
+    in property <string> shortcut;
+    // Waiting for the user to press the new combination.
+    in property <bool> recording;
+    in property <string> shortcut-error;
+    in-out property <bool> show-preview;
+    callback close();
+    callback record-shortcut();
+    // A key went down while recording (with its text); the app reads which
+    // keys are held.
+    callback shortcut-key(string);
+    callback cancel-recording();
+    callback clear-shortcut();
+    callback show-preview-changed(bool);
+
+    background: #000000a0;
+    TouchArea {
+        clicked => {
+            if !root.recording {
+                root.close();
+            }
+        }
+    }
+
+    Rectangle {
+        width: min(root.width - 48px, 480px);
+        height: layout.preferred-height;
+        background: Palette.background;
+        border-radius: 12px;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000099;
+        TouchArea { }
+
+        layout := VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+            Text {
+                text: "Settings";
+                font-size: 20px;
+                font-weight: 700;
+            }
+
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Go-live shortcut";
+                    font-weight: 600;
+                }
+                Text {
+                    text: "Works from any app: shares the window in front. Pressing it on the window you're already sharing stops sharing.";
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.35);
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 32px;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: root.recording ? Palette.accent-background : Palette.border;
+                        background: Palette.alternate-background;
+                        Text {
+                            x: 10px;
+                            text: root.recording ? "Press the keys… (Esc cancels)" : root.shortcut != "" ? root.shortcut : "Not set";
+                            font-weight: root.shortcut != "" && !root.recording ? 600 : 400;
+                            color: root.shortcut != "" || root.recording ? Palette.foreground : Palette.foreground.transparentize(0.5);
+                        }
+                        recorder := FocusScope {
+                            enabled: root.recording;
+                            key-pressed(event) => {
+                                if event.text == Key.Escape {
+                                    root.cancel-recording();
+                                } else {
+                                    root.shortcut-key(event.text);
+                                }
+                                accept
+                            }
+                        }
+                    }
+                    Button {
+                        text: root.recording ? "Cancel" : root.shortcut != "" ? "Change" : "Set";
+                        clicked => {
+                            if root.recording {
+                                root.cancel-recording();
+                            } else {
+                                root.record-shortcut();
+                                recorder.focus();
+                            }
+                        }
+                    }
+                    if root.shortcut != "" && !root.recording: Button {
+                        text: "Clear";
+                        clicked => { root.clear-shortcut(); }
+                    }
+                }
+                if root.shortcut-error != "": Text {
+                    text: root.shortcut-error;
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    color: #ed4245;
+                }
+            }
+
+            CheckBox {
+                text: "Show my own stream preview";
+                checked <=> root.show-preview;
+                toggled => { root.show-preview-changed(self.checked); }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                Button {
+                    text: "Done";
+                    primary: true;
+                    enabled: !root.recording;
+                    clicked => { root.close(); }
+                }
+            }
+        }
+    }
+}

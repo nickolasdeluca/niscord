@@ -1,6 +1,8 @@
 import { AboutSlint, Button, LineEdit, ListView, Palette } from "std-widgets.slint";
 import { SharePicker, SourceItem } from "picker.slint";
 import { Stage, StreamTile } from "stage.slint";
+import { SettingsDialog } from "settings.slint";
+export { StreamWindow } from "popout.slint";
 
 export { SourceItem, StreamTile }
 
@@ -200,6 +202,8 @@ component MainScreen inherits Rectangle {
     in property <bool> sharing;
     in property <[StreamTile]> tiles;
     in-out property <string> focused;
+    in property <bool> preview-hidden;
+    in property <int> popped-count;
     callback watch(string);
     callback unwatch(string);
     callback share();
@@ -210,6 +214,10 @@ component MainScreen inherits Rectangle {
     callback toggle-mute(string);
     callback disconnect();
     callback about();
+    callback open-settings();
+    callback pop-out(string);
+    callback hide-preview();
+    callback show-preview();
 
     HorizontalLayout {
         // Sidebar: who is online.
@@ -280,9 +288,22 @@ component MainScreen inherits Rectangle {
                                 clicked => { root.disconnect(); }
                             }
                         }
-                        Button {
-                            text: "About";
-                            clicked => { root.about(); }
+                        if root.sharing && root.preview-hidden: Button {
+                            text: "Show my preview";
+                            clicked => { root.show-preview(); }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button {
+                                text: "Settings";
+                                horizontal-stretch: 1;
+                                clicked => { root.open-settings(); }
+                            }
+                            Button {
+                                text: "About";
+                                horizontal-stretch: 1;
+                                clicked => { root.about(); }
+                            }
                         }
                     }
                 }
@@ -294,8 +315,11 @@ component MainScreen inherits Rectangle {
             horizontal-stretch: 1;
             tiles: root.tiles;
             focused <=> root.focused;
+            popped-count: root.popped-count;
             close(key) => { root.close-stream(key); }
             retry(key) => { root.retry-stream(key); }
+            pop-out(key) => { root.pop-out(key); }
+            hide-preview => { root.hide-preview(); }
             set-volume(key, value) => { root.set-volume(key, value); }
             toggle-mute(key) => { root.toggle-mute(key); }
             change-source => { root.share(); }
@@ -338,6 +362,15 @@ export component AppWindow inherits Window {
     in-out property <int> picker-resolution: 1;
     in-out property <int> picker-fps: 1;
     in-out property <bool> picker-audio: true;
+    // Your own preview tile is hidden (you still stream).
+    in property <bool> preview-hidden;
+    // Streams shown in their own windows.
+    in property <int> popped-count;
+    in property <bool> settings-open;
+    in property <string> shortcut;
+    in property <bool> shortcut-recording;
+    in property <string> shortcut-error;
+    in-out property <bool> show-preview: true;
 
     callback connect();
     callback disconnect();
@@ -352,6 +385,14 @@ export component AppWindow inherits Window {
     callback toggle-mute(string);
     callback picker-cancel();
     callback picker-choose(int);
+    callback pop-out(string);
+    callback set-preview-hidden(bool);
+    callback open-settings();
+    callback close-settings();
+    callback record-shortcut();
+    callback shortcut-key(string);
+    callback cancel-recording();
+    callback clear-shortcut();
 
     about-popup := PopupWindow {
         x: (root.width - 360px) / 2;
@@ -406,6 +447,12 @@ export component AppWindow inherits Window {
         retry-stream(key) => { root.retry-stream(key); }
         set-volume(key, value) => { root.set-volume(key, value); }
         toggle-mute(key) => { root.toggle-mute(key); }
+        preview-hidden: root.preview-hidden;
+        popped-count: root.popped-count;
+        pop-out(key) => { root.pop-out(key); }
+        hide-preview => { root.set-preview-hidden(true); }
+        show-preview => { root.set-preview-hidden(false); }
+        open-settings => { root.open-settings(); }
         watch(id) => { root.watch(id); }
         unwatch(id) => { root.unwatch(id); }
         share => { root.share(); }
@@ -424,6 +471,19 @@ export component AppWindow inherits Window {
         audio <=> root.picker-audio;
         cancel => { root.picker-cancel(); }
         choose(key) => { root.picker-choose(key); }
+    }
+
+    if root.connected && root.settings-open: SettingsDialog {
+        shortcut: root.shortcut;
+        recording: root.shortcut-recording;
+        shortcut-error: root.shortcut-error;
+        show-preview <=> root.show-preview;
+        close => { root.close-settings(); }
+        record-shortcut => { root.record-shortcut(); }
+        shortcut-key(typed) => { root.shortcut-key(typed); }
+        cancel-recording => { root.cancel-recording(); }
+        clear-shortcut => { root.clear-shortcut(); }
+        show-preview-changed(show) => { root.set-preview-hidden(!show); }
     }
 
     // Transient message banner (e.g. "coming soon", "stream ended").

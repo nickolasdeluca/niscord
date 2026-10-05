@@ -6,6 +6,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -151,7 +152,7 @@ impl App {
         }
     }
 
-    fn start_share(&self, source: Source, resolution: Resolution, fps: u32, share_audio: bool) {
+    pub fn start_share(&self, source: Source, resolution: Resolution, fps: u32, share_audio: bool) {
         // Release the previous pipeline before starting a new one.
         let was_sharing = self.share.borrow_mut().take().is_some();
         let generation = self.share_generation.get() + 1;
@@ -166,6 +167,7 @@ impl App {
                 let sink = StreamSink {
                     generation,
                     loopback: receiver.clone(),
+                    preview: self.preview.clone(),
                     links: links.clone(),
                     frame_interval: Duration::from_secs(1) / fps.max(1),
                     last_capture: None,
@@ -190,14 +192,49 @@ impl App {
 
         let audio = if share_audio { self.start_audio(&source, links.clone()) } else { None };
 
-        let mut tile = new_tile(SELF_KEY, "You", &source.title, true);
-        tile.status = "Starting…".into();
-        self.upsert_tile(tile);
+        if self.preview.load(Ordering::Relaxed) {
+            self.show_self_tile(&source.title);
+        }
         self.ui().set_sharing(true);
         let last_stats = Cell::new((sender.counters().snapshot(), receiver.counters().snapshot()));
         let last_audio = Cell::new((0, Instant::now()));
         *self.share.borrow_mut() = Some(ActiveShare { source, sender, receiver, audio, last_stats, last_audio });
         self.announce_share();
+    }
+
+    fn show_self_tile(&self, title: &str) {
+        let mut tile = new_tile(SELF_KEY, "You", title, true);
+        tile.status = "Starting…".into();
+        self.upsert_tile(tile);
+    }
+
+    /// Show or hide your own preview tile (remembered). While hidden the
+    /// stream goes on, but it isn't decoded locally.
+    pub fn set_preview_hidden(&self, hidden: bool) {
+        let mut settings = Settings::load();
+        settings.hide_preview = hidden;
+        settings.save();
+        self.preview.store(!hidden, Ordering::Relaxed);
+        let ui = self.ui();
+        ui.set_preview_hidden(hidden);
+        ui.set_show_preview(!hidden);
+        if hidden {
+            self.remove_tile(SELF_KEY);
+            return;
+        }
+        let share = self.share.borrow();
+        if let Some(share) = share.as_ref()
+            && !self.has_tile(SELF_KEY)
+        {
+            self.show_self_tile(&share.source.title);
+            // The preview decoder skipped everything so far; it needs a keyframe.
+            share.sender.control().request_keyframe();
+        }
+    }
+
+    /// The window being shared, if it's a window.
+    pub fn shared_source(&self) -> Option<Source> {
+        self.share.borrow().as_ref().map(|share| share.source.clone())
     }
 
     /// Capture the source's sound: a window's app, or for a screen,
@@ -311,6 +348,8 @@ impl App {
 struct StreamSink {
     generation: u64,
     loopback: Arc<VideoReceiver>,
+    /// Whether the preview is shown; when not, skip decoding it.
+    preview: Arc<AtomicBool>,
     links: Option<Arc<Links>>,
     frame_interval: Duration,
     last_capture: Option<Instant>,
@@ -318,7 +357,9 @@ struct StreamSink {
 
 impl EncodedSink for StreamSink {
     fn encoded(&mut self, frame: &EncodedFrame, captured_at: Instant) {
-        self.loopback.push(frame.data.clone(), frame.keyframe, Some(captured_at));
+        if self.preview.load(Ordering::Relaxed) {
+            self.loopback.push(frame.data.clone(), frame.keyframe, Some(captured_at));
+        }
         if let Some(links) = &self.links {
             // RTP timestamps advance by the real gap between captures, so
             // viewers play frames at the pace they were captured.

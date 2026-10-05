@@ -1,0 +1,56 @@
+import { Tile, StreamTile } from "stage.slint";
+
+// One stream in its own window, like Discord's pop-out: move it to another
+// monitor, resize it, or go full screen. Closing it puts the stream back on
+// the stage.
+export component StreamWindow inherits Window {
+    in property <StreamTile> tile;
+    in-out property <bool> fullscreen;
+    callback close-stream();
+    callback retry();
+    callback change-source();
+    callback pop-in();
+    callback hide-preview();
+    callback set-volume(float);
+    callback toggle-mute();
+    callback toggle-fullscreen();
+
+    title: root.tile.name + (root.tile.title != "" ? " · " + root.tile.title : "") + " — Niscord";
+    icon: @image-url("../assets/icon.png");
+    preferred-width: 960px;
+    preferred-height: 540px;
+    min-width: 320px;
+    min-height: 180px;
+    background: black;
+    init => { keys.focus(); }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape && root.fullscreen {
+                root.toggle-fullscreen();
+                return accept;
+            }
+            if event.text == Key.F11 {
+                root.toggle-fullscreen();
+                return accept;
+            }
+            reject
+        }
+
+        Tile {
+            width: parent.width;
+            height: parent.height;
+            tile: root.tile;
+            popped: true;
+            focused: root.fullscreen;
+            close => { root.close-stream(); }
+            retry => { root.retry(); }
+            change-source => { root.change-source(); }
+            pop-in => { root.pop-in(); }
+            hide-preview => { root.hide-preview(); }
+            set-volume(value) => { root.set-volume(value); }
+            toggle-mute => { root.toggle-mute(); }
+            toggle-focus => { root.toggle-fullscreen(); }
+        }
+    }
+}
