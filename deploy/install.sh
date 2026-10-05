@@ -70,6 +70,18 @@ else
     step "Building niscord-server from $SRC"
     [[ -f $SRC/Cargo.toml ]] || die "run this from a Niscord source tree, or pass --binary"
     apt-get install -y -q build-essential pkg-config
+    # Small VMs (1 GB) run out of memory linking the optimised build.
+    MEM_MB=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)
+    if [[ $MEM_MB -lt 2000 && -z $(swapon --noheadings) ]]; then
+        echo "Only ${MEM_MB} MB of memory: adding 2 GB of swap at /swapfile for the build"
+        if [[ ! -f /swapfile ]]; then
+            fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+            chmod 600 /swapfile
+            mkswap /swapfile > /dev/null
+        fi
+        swapon /swapfile
+        grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
     # Build as the user who ran sudo, with their own rustup toolchain (the
     # distribution's cargo is usually too old for edition 2024).
     BUILD_USER="${SUDO_USER:-root}"
@@ -99,6 +111,36 @@ RESOLVED="$(getent ahostsv4 "$DOMAIN" | awk 'NR == 1 {print $1}' || true)"
 if [[ $RESOLVED != "$PUBLIC_IP" ]]; then
     warn "$DOMAIN resolves to '${RESOLVED:-nothing}', not $PUBLIC_IP. Point its DNS A record here;"
     warn "Caddy can't get a TLS certificate until it does (it keeps retrying)."
+fi
+
+# ---------------------------------------------------------------------------
+# Before Caddy starts: it needs ports 80/443 to get its certificate.
+if command -v ufw > /dev/null && ufw status | grep -q 'Status: active'; then
+    step "Opening firewall ports (ufw)"
+    ufw allow 80/tcp > /dev/null
+    ufw allow 443/tcp > /dev/null
+    ufw allow 3478/udp > /dev/null
+    ufw allow "$RELAY_MIN:$RELAY_MAX/udp" > /dev/null
+elif command -v iptables > /dev/null && iptables -S INPUT | grep -q -- '-j REJECT'; then
+    # Oracle Cloud's Ubuntu images reject everything but SSH with their own
+    # iptables rules (saved by netfilter-persistent): accept our ports ahead
+    # of the REJECT, and save so they survive a reboot.
+    step "Opening firewall ports (iptables)"
+    allow() {
+        local reject
+        reject=$(iptables -L INPUT --line-numbers -n | awk '$2 == "REJECT" {print $1; exit}')
+        iptables -C INPUT -p "$1" --dport "$2" -m state --state NEW -j ACCEPT 2> /dev/null ||
+            iptables -I INPUT "$reject" -p "$1" --dport "$2" -m state --state NEW -j ACCEPT
+    }
+    allow tcp 80
+    allow tcp 443
+    allow udp 3478
+    allow udp "$RELAY_MIN:$RELAY_MAX"
+    if command -v netfilter-persistent > /dev/null; then
+        netfilter-persistent save > /dev/null 2>&1 || warn "couldn't save the iptables rules; they reset on reboot"
+    else
+        warn "netfilter-persistent isn't installed; the iptables rules reset on reboot"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -192,14 +234,6 @@ systemctl enable niscord-server > /dev/null 2>&1
 systemctl restart niscord-server
 
 # ---------------------------------------------------------------------------
-if command -v ufw > /dev/null && ufw status | grep -q 'Status: active'; then
-    step "Opening firewall ports (ufw)"
-    ufw allow 80/tcp > /dev/null
-    ufw allow 443/tcp > /dev/null
-    ufw allow 3478/udp > /dev/null
-    ufw allow "$RELAY_MIN:$RELAY_MAX/udp" > /dev/null
-fi
-
 step "Checking"
 sleep 2
 for unit in niscord-server coturn caddy; do
@@ -217,7 +251,7 @@ Done. Friends connect with:
   Server:    wss://$DOMAIN
   Password:  $PASSWORD
 
-Make sure your VPS provider's firewall (security group) allows:
+Make sure your VPS provider's firewall (security group / Oracle security list) allows:
   TCP 80, 443         Caddy (TLS certificate + wss://)
   UDP 3478            STUN/TURN
   UDP $RELAY_MIN-$RELAY_MAX     TURN relay
