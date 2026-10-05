@@ -223,6 +223,18 @@ NISCORD_DEFAULT_SERVER=wss://niscord.example.com cargo build --release -p niscor
 
 ### For your friends
 
+The easiest way to install is the PowerShell installer: it downloads the latest
+release, checks its checksum, installs it for the current user (no admin rights) in
+`%LOCALAPPDATA%\Programs\Niscord` and adds a Start Menu shortcut. Send friends this,
+with your server's address (keep it out of public places):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/nickolasdeluca/niscord/main/install.ps1))) -Server wss://your.server
+```
+
+Without `-Server` they type the address on first launch. Running it again updates
+Niscord; `-Desktop` adds a desktop shortcut, `-Uninstall` removes it.
+
 `niscord.exe` is a single file with no installer and no runtime to install (the C
 runtime is linked in). It needs Windows 10 version 2004 or later (Windows 11 is best:
 it hides the capture border). The first time a friend watches or shares, Windows
@@ -234,7 +246,11 @@ The app keeps its settings in `%APPDATA%\Niscord\settings.json` (the password is
 stored in plain text) and its log in `%APPDATA%\Niscord\niscord.log` (the previous
 run's in `niscord.old.log`). If something goes wrong, that log is what to send.
 
-## License notes
+## License
+
+Niscord is released under the [MIT License](LICENSE). It is provided as is, without
+warranty of any kind; the authors aren't liable for how it is used.
 
 Slint is used under its royalty-free license, which requires attribution. The app's
-About dialog shows it.
+About dialog shows it. Other dependencies keep their own licenses (MIT, Apache-2.0,
+BSD and similar).
