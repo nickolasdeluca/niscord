@@ -64,6 +64,12 @@ cargo run -p niscord                          # the app; connect to 127.0.0.1:80
 cargo test --workspace
 ```
 
+Cargo never deletes old build output, so `target\` grows by gigabytes over time
+(every compiler update or change of build flags adds a full set of dependencies).
+`scripts\clean.ps1` frees it: by default the debug build and incremental caches;
+`-Release` also old release builds (keeping `niscord.exe` and `niscord-server.exe`);
+`-All` everything. `-WhatIf` shows what would go first.
+
 To test with one machine, run a fake friend who appears to be sharing:
 
 ```sh
