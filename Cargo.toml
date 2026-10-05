@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/protocol", "crates/server", "crates/media", "crates/transport", "crates/app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -22,6 +22,14 @@ tokio-tungstenite = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# Full debug info for every dependency (webrtc, Slint, ...) in every test binary
+# filled tens of GB. Line tables are enough for backtraces in our own code.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 # Pixel loops are unbearably slow unoptimized, even while debugging the rest.
 [profile.dev.package.niscord-media]

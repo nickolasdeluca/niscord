@@ -11,6 +11,7 @@ mod settings;
 mod share;
 mod thumbnails;
 mod tiles;
+mod update;
 mod watch;
 
 use std::cell::{Cell, RefCell};
@@ -63,6 +64,8 @@ struct App {
     hotkey: RefCell<Option<hotkey::HotkeyListener>>,
     #[cfg(not(windows))]
     hotkey: RefCell<Option<()>>,
+    /// A downloaded update, installed when the user restarts.
+    update: RefCell<Option<update::Staged>>,
 }
 
 thread_local! {
@@ -230,6 +233,30 @@ impl App {
     }
 }
 
+impl App {
+    fn update_ready(&self, staged: update::Staged) {
+        self.ui().set_update_version(staged.version.as_str().into());
+        *self.update.borrow_mut() = Some(staged);
+    }
+
+    /// Install the downloaded update and restart into it.
+    fn restart_to_update(&self) {
+        let Some(staged) = self.update.borrow().clone() else { return };
+        match update::apply(&staged) {
+            Ok(()) => {
+                tracing::info!(version = staged.version, "restarting into the update");
+                self.close_all_popouts();
+                let _ = self.ui().hide();
+                let _ = slint::quit_event_loop();
+            }
+            Err(err) => {
+                tracing::warn!("couldn't install the update: {err:#}");
+                self.show_notice(format!("Couldn't install the update: {err:#}"));
+            }
+        }
+    }
+}
+
 fn parse_id(id: &str) -> Option<PeerId> {
     id.parse().ok()
 }
@@ -276,9 +303,13 @@ fn main() -> anyhow::Result<()> {
         preview: Arc::new(std::sync::atomic::AtomicBool::new(!settings.hide_preview)),
         shortcut: Cell::new(None),
         hotkey: RefCell::new(None),
+        update: RefCell::new(None),
     });
     APP.with(|a| *a.borrow_mut() = Some(app));
     with_app(|app| app.init_shortcut());
+    update::start(|staged| {
+        let _ = slint::invoke_from_event_loop(move || with_app(|app| app.update_ready(staged)));
+    });
 
     ui.on_connect(|| with_app(|app| app.connect()));
     ui.on_disconnect(|| with_app(|app| app.disconnect(None)));
@@ -312,6 +343,7 @@ fn main() -> anyhow::Result<()> {
     ui.on_shortcut_key(|typed| with_app(|app| app.shortcut_key(&typed)));
     ui.on_cancel_recording(|| with_app(|app| app.cancel_recording()));
     ui.on_clear_shortcut(|| with_app(|app| app.clear_shortcut()));
+    ui.on_restart_to_update(|| with_app(|app| app.restart_to_update()));
     // Pop-out windows close with the main window (otherwise the app would
     // keep running without it).
     ui.window().on_close_requested(|| {

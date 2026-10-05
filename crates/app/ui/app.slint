@@ -204,6 +204,8 @@ component MainScreen inherits Rectangle {
     in-out property <string> focused;
     in property <bool> preview-hidden;
     in property <int> popped-count;
+    // A downloaded update waiting for a restart ("0.2.0"), or empty.
+    in property <string> update-version;
     callback watch(string);
     callback unwatch(string);
     callback share();
@@ -218,6 +220,7 @@ component MainScreen inherits Rectangle {
     callback pop-out(string);
     callback hide-preview();
     callback show-preview();
+    callback restart-to-update();
 
     HorizontalLayout {
         // Sidebar: who is online.
@@ -239,6 +242,28 @@ component MainScreen inherits Rectangle {
                         peer: peer;
                         watch => { root.watch(peer.id); }
                         unwatch => { root.unwatch(peer.id); }
+                    }
+                }
+                if root.update-version != "": Rectangle {
+                    background: #3ba55d33;
+                    border-color: #3ba55d;
+                    border-width: 1px;
+                    border-radius: 8px;
+                    height: update-row.preferred-height;
+                    update-row := HorizontalLayout {
+                        padding: 8px;
+                        spacing: 8px;
+                        Text {
+                            text: "Niscord " + root.update-version + " is ready to install.";
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        Button {
+                            text: "Restart";
+                            primary: true;
+                            clicked => { root.restart-to-update(); }
+                        }
                     }
                 }
                 // Local user panel.
@@ -371,6 +396,7 @@ export component AppWindow inherits Window {
     in property <bool> shortcut-recording;
     in property <string> shortcut-error;
     in-out property <bool> show-preview: true;
+    in property <string> update-version;
 
     callback connect();
     callback disconnect();
@@ -393,6 +419,7 @@ export component AppWindow inherits Window {
     callback shortcut-key(string);
     callback cancel-recording();
     callback clear-shortcut();
+    callback restart-to-update();
 
     about-popup := PopupWindow {
         x: (root.width - 360px) / 2;
@@ -449,6 +476,8 @@ export component AppWindow inherits Window {
         toggle-mute(key) => { root.toggle-mute(key); }
         preview-hidden: root.preview-hidden;
         popped-count: root.popped-count;
+        update-version: root.update-version;
+        restart-to-update => { root.restart-to-update(); }
         pop-out(key) => { root.pop-out(key); }
         hide-preview => { root.set-preview-hidden(true); }
         show-preview => { root.set-preview-hidden(false); }

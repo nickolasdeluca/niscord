@@ -195,17 +195,25 @@ uses TURN over UDP only. See `deploy/install.sh` for a working coturn configurat
 ### Releases
 
 Pushing a tag builds everything on GitHub Actions and publishes a release with
-`niscord.exe`, the Windows and Linux (x86_64, static) server binaries and checksums:
+`niscord.exe`, the Windows and Linux (x86_64, static) server binaries and checksums.
+Bump `version` in the workspace `Cargo.toml` first; the tag must match it:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-Set the repository variable `NISCORD_DEFAULT_SERVER` (Settings → Secrets and variables
-→ Actions → Variables) to your server, e.g. `wss://niscord.example.com`, so the app
-comes with it filled in. Friends need to be able to download the release: on a
-private repository only collaborators can.
+**Self-update:** the app checks GitHub for a newer release at start-up and every six
+hours, downloads `niscord.exe` in the background, verifies it against the release's
+`SHA256SUMS.txt`, and offers *Restart* in the sidebar (an update never interrupts a
+stream). Development builds don't update themselves, and `NISCORD_NO_UPDATE=1`
+turns it off.
+
+Releases are public, so they don't carry a server address. Give friends their first
+copy from a private build with the address filled in (below); the app saves it in
+their settings, and later updates from public releases keep using it. (To bake an
+address into release builds anyway, set the repository variable
+`NISCORD_DEFAULT_SERVER`.)
 
 ### Building it yourself
 
