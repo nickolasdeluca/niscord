@@ -325,7 +325,7 @@ impl App {
             text += &format!(" · {} dropped", e.dropped + d.dropped);
         }
         if e.skipped > 0 {
-            text += &format!(" · {} skipped by encoder", e.skipped);
+            text += &format!(" · {} skipped to fit the bandwidth", e.skipped);
         }
         if let Some(audio) = &share.audio {
             let (prev_bytes, prev_at) = share.last_audio.get();

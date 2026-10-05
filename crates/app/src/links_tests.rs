@@ -167,12 +167,18 @@ fn bitrate_follows_slowest_viewer_within_bounds() {
     let max = 4_000_000;
     // First decision always applies; nobody watching means full quality.
     assert_eq!(next_bitrate(None, max, None), Some(max));
-    // Follows the estimate down, but never below the floor or above the preset.
-    assert_eq!(next_bitrate(Some(1_000_000), max, Some(max)), Some(1_000_000));
-    assert_eq!(next_bitrate(Some(50_000), max, Some(1_000_000)), Some(MIN_BITRATE));
+    // Follows the estimate down with headroom (85%, minus audio), never
+    // below the floor or above the preset.
+    assert_eq!(next_bitrate(Some(2_000_000), max, Some(max)), Some(1_550_000));
+    assert_eq!(next_bitrate(Some(300_000), max, Some(1_000_000)), Some(MIN_VIDEO_BITRATE));
     assert_eq!(next_bitrate(Some(9_000_000), max, Some(1_000_000)), Some(max));
+    // Video stays under the estimate even near the bottom.
+    for estimate in [300_000, 500_000, 1_000_000, 3_000_000] {
+        let target = next_bitrate(Some(estimate), max, None).unwrap();
+        assert!(target + AUDIO_RESERVE <= estimate || target == MIN_VIDEO_BITRATE, "{estimate}: {target}");
+    }
     // Small wobbles are ignored.
-    assert_eq!(next_bitrate(Some(1_050_000), max, Some(1_000_000)), None);
+    assert_eq!(next_bitrate(Some(2_050_000), max, Some(1_550_000)), None);
     // A preset below the floor is respected.
-    assert_eq!(next_bitrate(Some(50_000), 200_000, None), Some(200_000));
+    assert_eq!(next_bitrate(Some(50_000), 100_000, None), Some(100_000));
 }

@@ -464,11 +464,23 @@ async fn steer_bitrate(links: Weak<Links>) {
     }
 }
 
-/// The bitrate to give the encoder, if it should change: the slowest
-/// viewer's estimate (or the quality preset's maximum when nobody watches),
-/// clamped to sane bounds, ignoring small wobbles.
+/// Share of the bandwidth estimate given to video. WebRTC's pacer releases
+/// packets at exactly the estimate and queues anything beyond it, so video
+/// aiming at the whole estimate (plus audio, plus RTP overhead) builds an
+/// ever-growing delay.
+const ESTIMATE_SHARE: f64 = 0.85;
+/// Opus at 128 kbps plus its packet overhead.
+const AUDIO_RESERVE: u32 = 150_000;
+/// Below this, video is mush anyway; the frame-skipping budget keeps it
+/// within the bandwidth regardless.
+const MIN_VIDEO_BITRATE: u32 = 150_000;
+
+/// The bitrate to give the encoder, if it should change: a safe share of
+/// the slowest viewer's estimate (or the quality preset's maximum when
+/// nobody watches), within bounds, ignoring small wobbles.
 fn next_bitrate(slowest_estimate: Option<u32>, max: u32, applied: Option<u32>) -> Option<u32> {
-    let target = slowest_estimate.unwrap_or(max).clamp(MIN_BITRATE.min(max), max);
+    let share = |estimate: u32| ((estimate as f64 * ESTIMATE_SHARE) as u32).saturating_sub(AUDIO_RESERVE);
+    let target = slowest_estimate.map_or(max, share).clamp(MIN_VIDEO_BITRATE.min(max), max);
     let changed =
         applied.is_none_or(|applied| (target as f64 - applied as f64).abs() / applied as f64 > BITRATE_HYSTERESIS);
     changed.then_some(target)

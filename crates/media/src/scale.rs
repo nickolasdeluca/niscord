@@ -22,9 +22,12 @@ pub fn fit(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
 pub fn downscale_rgba(src: &[u8], width: u32, height: u32, row_bytes: usize, max_w: u32, max_h: u32) -> RgbaImage {
     let (dw, dh) = fit(width, height, max_w, max_h);
     if (dw, dh) == (width, height) {
-        // No scaling needed: just strip the row padding.
+        // No scaling needed: just strip the row padding, a row at a time.
         let row = width as usize * 4;
-        let pixels = src.chunks(row_bytes).take(height as usize).flat_map(|r| &r[..row]).copied().collect();
+        let mut pixels = Vec::with_capacity(row * height as usize);
+        for line in src.chunks(row_bytes).take(height as usize) {
+            pixels.extend_from_slice(&line[..row]);
+        }
         return RgbaImage { width, height, pixels };
     }
     let mut pixels = vec![0u8; dw as usize * dh as usize * 4];

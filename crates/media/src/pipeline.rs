@@ -245,6 +245,52 @@ impl Drop for VideoSender {
 /// packets) gets a picture without waiting for something to move.
 const REPEAT_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Keeps the encoded stream within its bitrate by skipping frames, like
+/// OpenH264's own frame skipping, for every encoder.
+///
+/// GPU encoders don't skip frames: on busy content NVENC has a floor well
+/// above low targets (~1.5 Mbps for moving 720p30 when asked for 0.5).
+/// WebRTC's pacer then releases packets at exactly the bandwidth estimate
+/// and queues the rest, up to thousands of packets: the stream falls
+/// further and further behind, then freezes when the queue overflows.
+/// Skipping frames instead keeps the delay bounded; the picture just gets
+/// choppier when bandwidth is short.
+struct RateBudget {
+    bits_per_second: f64,
+    /// Credit in bits; negative after a frame bigger than the budget (a
+    /// keyframe, typically), which then has to be paid back.
+    level: f64,
+    last: Instant,
+}
+
+/// Unused budget is kept for this long, so short bursts (a scene change)
+/// don't skip frames, but idle time doesn't bank a big burst later.
+const BUDGET_BURST: Duration = Duration::from_millis(500);
+
+impl RateBudget {
+    fn new(bits_per_second: u32, now: Instant) -> Self {
+        Self { bits_per_second: bits_per_second as f64, level: 0.0, last: now }
+    }
+
+    fn set_rate(&mut self, bits_per_second: u32) {
+        self.bits_per_second = bits_per_second as f64;
+    }
+
+    /// Whether a frame may be encoded now. `must` (a keyframe someone is
+    /// waiting for) always goes, and is paid back afterwards.
+    fn allow(&mut self, now: Instant, must: bool) -> bool {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        let cap = self.bits_per_second * BUDGET_BURST.as_secs_f64();
+        self.level = (self.level + self.bits_per_second * elapsed).min(cap);
+        must || self.level >= 0.0
+    }
+
+    fn spend(&mut self, bytes: usize) {
+        self.level -= bytes as f64 * 8.0;
+    }
+}
+
 fn encode_loop(
     mut encoder: VideoEncoder,
     frames: mpsc::Receiver<(Instant, RgbaImage)>,
@@ -255,6 +301,7 @@ fn encode_loop(
     let start = Instant::now();
     let mut last: Option<(Instant, RgbaImage)> = None;
     let mut keyframe_pending = false;
+    let mut budget = RateBudget::new(encoder.bitrate(), start);
     loop {
         for msg in control.try_iter() {
             match msg {
@@ -263,6 +310,7 @@ fn encode_loop(
                     keyframe_pending = true;
                 }
                 Control::Bitrate(bps) => {
+                    budget.set_rate(bps);
                     if let Err(err) = encoder.set_bitrate(bps) {
                         tracing::warn!("{err}");
                     }
@@ -285,10 +333,17 @@ fn encode_loop(
             },
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
+        // Over budget: skip this frame rather than queue it in the network.
+        if !budget.allow(Instant::now(), keyframe_pending) {
+            counters.skipped.fetch_add(1, Ordering::Relaxed);
+            last = Some((captured_at, image));
+            continue;
+        }
         let began = Instant::now();
         let timestamp_ms = captured_at.saturating_duration_since(start).as_millis() as u64;
         match encoder.encode(&image, timestamp_ms) {
             Ok(Some(frame)) => {
+                budget.spend(frame.data.len());
                 keyframe_pending &= !frame.keyframe;
                 counters.hardware.store(encoder.is_hardware(), Ordering::Relaxed);
                 counters.record(frame.data.len(), began.elapsed(), None, frame.width, frame.height);
@@ -404,6 +459,76 @@ mod tests {
             let _ = self.0.send((frame.keyframe, Instant::now()));
         }
         fn source_closed(&mut self) {}
+    }
+
+    #[test]
+    fn budget_skips_frames_until_a_big_one_is_paid_back() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut budget = RateBudget::new(1_000_000, start);
+        assert!(budget.allow(at(0), false));
+        budget.spend(250_000 / 8); // a 250 kbit keyframe
+        assert!(!budget.allow(at(100), false), "100 ms only pays back 100 kbit");
+        assert!(budget.allow(at(100), true), "a requested keyframe always goes");
+        assert!(budget.allow(at(250), false), "paid back after 250 ms");
+        // Idle time banks at most half a second of credit.
+        assert!(budget.allow(at(10_000), false));
+        budget.spend(600_000 / 8);
+        assert!(!budget.allow(at(10_000), false));
+    }
+
+    /// The bug behind choppy, ever-later NVIDIA streams: GPU encoders don't
+    /// skip frames, and on busy content overshoot a low target several
+    /// times over. The pipeline's budget must hold the line regardless.
+    #[test]
+    fn output_stays_within_a_low_target_on_busy_content() {
+        let (width, height, fps) = (1280u32, 720u32, 30u32);
+        let frames: Vec<RgbaImage> = (0..30u32)
+            .map(|t| {
+                let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+                for y in 0..height {
+                    for x in 0..width {
+                        let (sx, sy) = (x + t * 12, y + t * 5);
+                        let v = (((sx / 8) ^ (sy / 8)) % 7 * 30) as u8;
+                        pixels.extend_from_slice(&[v, v / 2 + (sy % 64) as u8, 255 - v, 255]);
+                    }
+                }
+                RgbaImage { width, height, pixels }
+            })
+            .collect();
+
+        let (frame_tx, frame_rx) = mpsc::sync_channel(1);
+        let (control_tx, control_rx) = mpsc::channel();
+        let (out_tx, out) = mpsc::channel();
+        // The default preference: the GPU encoder where there is one.
+        let encoder = VideoEncoder::new(EncoderSettings { fps, bitrate_bps: 2_000_000 }).unwrap();
+        let counters = Arc::new(Counters::default());
+        let thread = {
+            let counters = counters.clone();
+            std::thread::spawn(move || encode_loop(encoder, frame_rx, control_rx, Collect(out_tx), &counters))
+        };
+
+        // 2 s at the starting rate, then the network estimate drops.
+        let target = 500_000.0;
+        let mut measured = (0usize, Instant::now());
+        for t in 0..(fps * 6) {
+            if t == fps * 2 {
+                control_tx.send(Control::Bitrate(target as u32)).unwrap();
+            }
+            if t == fps * 3 {
+                // Measure from 1 s after the change, once any earlier credit is gone.
+                let _ = out.try_iter().count();
+                measured = (counters.snapshot().bytes as usize, Instant::now());
+            }
+            frame_tx.send((Instant::now(), frames[(t % 30) as usize].clone())).unwrap();
+            std::thread::sleep(Duration::from_secs(1) / fps);
+        }
+        let secs = measured.1.elapsed().as_secs_f64();
+        let kbps = (counters.snapshot().bytes as usize - measured.0) as f64 * 8.0 / secs / 1000.0;
+        drop(frame_tx);
+        thread.join().unwrap();
+        println!("hardware {}: {kbps:.0} kbps against a {} kbps target", counters.snapshot().hardware, target / 1000.0);
+        assert!(kbps < target / 1000.0 * 1.3, "{kbps:.0} kbps for a {} kbps target", target / 1000.0);
     }
 
     #[test]

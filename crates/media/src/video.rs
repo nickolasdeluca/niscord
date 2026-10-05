@@ -149,6 +149,11 @@ impl VideoEncoder {
         })
     }
 
+    /// The target bitrate, in bits per second.
+    pub fn bitrate(&self) -> u32 {
+        self.settings.bitrate_bps
+    }
+
     /// Name of the encoder in use, once the first frame went through.
     pub fn backend(&self) -> Option<&str> {
         #[cfg(windows)]
