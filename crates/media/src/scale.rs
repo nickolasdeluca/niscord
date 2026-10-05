@@ -46,7 +46,7 @@ pub fn downscale_rgba(src: &[u8], width: u32, height: u32, row_bytes: usize, max
             let mut sum = [0u32; 4];
             for sy in y0..y1 {
                 let row = &src[sy * row_bytes..];
-                for px in row[x0 * 4..x1 * 4].chunks_exact(4) {
+                for px in row[x0 * 4..x1 * 4].as_chunks::<4>().0 {
                     sum[0] += px[0] as u32;
                     sum[1] += px[1] as u32;
                     sum[2] += px[2] as u32;

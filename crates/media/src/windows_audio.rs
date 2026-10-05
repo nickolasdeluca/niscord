@@ -30,7 +30,7 @@ fn audio_error(context: &str, err: impl std::fmt::Display) -> Error {
 }
 
 fn bytes_to_f32(bytes: &[u8]) -> impl Iterator<Item = f32> + '_ {
-    bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b))
 }
 
 /// Captures audio until dropped, handing out 20 ms interleaved frames.
