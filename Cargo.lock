@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "niscord"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3240,7 +3240,7 @@ dependencies = [
 
 [[package]]
 name = "niscord-media"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "openh264",
  "openh264-sys2",
@@ -3254,7 +3254,7 @@ dependencies = [
 
 [[package]]
 name = "niscord-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3263,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "niscord-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3283,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "niscord-transport"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
