@@ -4,3 +4,4 @@
 # Scripts and configs that run on Linux must keep LF line endings.
 *.sh text eol=lf
 deploy/** text eol=lf
+.githooks/** text eol=lf
