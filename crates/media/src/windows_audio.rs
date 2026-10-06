@@ -146,9 +146,10 @@ pub struct AudioPlayer {
     thread: Option<JoinHandle<()>>,
 }
 
-/// Cushion against network jitter, and the most delay we tolerate.
+/// Cushion against network jitter, and the most delay we tolerate before
+/// dropping audio (below that, playback catches up gradually).
 const PLAYOUT_TARGET: Duration = Duration::from_millis(60);
-const PLAYOUT_MAX: Duration = Duration::from_millis(250);
+const PLAYOUT_MAX: Duration = Duration::from_millis(400);
 
 impl AudioPlayer {
     pub fn start() -> Result<Self> {
