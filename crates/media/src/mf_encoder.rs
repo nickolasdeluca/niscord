@@ -172,7 +172,7 @@ impl MfEncoder {
             let events: IMFMediaEventGenerator = transform.cast().map_err(|e| mf_error("not asynchronous", e))?;
 
             // Real-time streaming: constant bitrate, no B-frames (they add
-            // delay), a keyframe every few seconds for loss recovery.
+            // delay), keyframes mostly on request.
             let set = |api: &GUID, value: VARIANT| codec.SetValue(api, &value);
             let _ = set(&CODECAPI_AVLowLatencyMode, variant_bool(true));
             let _ = set(&CODECAPI_AVEncCommonRateControlMode, variant_u32(eAVEncCommonRateControlMode_CBR.0 as u32));

@@ -161,8 +161,10 @@ impl App {
         let links = self.links();
         let settings = stream_settings(&source, resolution, fps);
         let frames = self.frames.clone();
+        // Errors are handled in `update_share_stats`: the preview gets every
+        // packet, so they mean the GPU encoder's output is broken.
         let started =
-            VideoReceiver::start(move |image| frames.offer(SELF_KEY.to_owned(), image)).and_then(|receiver| {
+            VideoReceiver::start(move |image| frames.offer(SELF_KEY.to_owned(), image), || {}).and_then(|receiver| {
                 let receiver = Arc::new(receiver);
                 let sink = StreamSink {
                     generation,

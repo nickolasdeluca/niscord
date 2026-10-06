@@ -14,9 +14,12 @@ use openh264::formats::{RgbaSliceU8, YUVBuffer, YUVSource};
 
 use crate::{Error, Result, RgbaImage};
 
-/// How often to send a full keyframe even when nobody asks for one, so a
-/// viewer that lost packets recovers on its own.
-pub(crate) const KEYFRAME_INTERVAL_SECS: u32 = 5;
+/// How often to send a full keyframe even when nobody asks for one: only a
+/// backstop, since viewers ask for one when they lose packets or can't
+/// decode. Each keyframe is many times a normal frame; with one every 5 s,
+/// paying it back skipped about half a second of frames (33 -> 18 fps on a
+/// CS2 stream) and its burst held audio up behind it in the pacer.
+pub(crate) const KEYFRAME_INTERVAL_SECS: u32 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderSettings {
@@ -476,6 +479,22 @@ mod tests {
         }
         assert!(decoded >= 5, "only {decoded} frames decoded");
         assert_eq!(keyframes, 1, "only the first frame should be a keyframe");
+    }
+
+    /// Unrequested keyframes made the picture stutter every few seconds.
+    #[test]
+    fn no_unrequested_keyframes_for_a_long_while() {
+        let fps = 10;
+        let mut encoder =
+            VideoEncoder::with_preference(EncoderSettings { fps, bitrate_bps: 500_000 }, EncoderPreference::Software)
+                .unwrap();
+        let mut keyframes = 0;
+        for t in 0..fps * 30 {
+            if let Some(encoded) = encoder.encode(&frame(64, 48, t), (t * 1000 / fps) as u64).unwrap() {
+                keyframes += encoded.keyframe as u32;
+            }
+        }
+        assert_eq!(keyframes, 1, "keyframes in 30 s");
     }
 
     #[test]

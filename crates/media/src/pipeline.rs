@@ -375,8 +375,13 @@ pub struct VideoReceiver {
 }
 
 impl VideoReceiver {
-    /// `on_frame` runs on the decoder thread for every decoded picture.
-    pub fn start(on_frame: impl FnMut(RgbaImage) + Send + 'static) -> Result<Self> {
+    /// `on_frame` runs on the decoder thread for every decoded picture, and
+    /// `on_error` for every access unit the decoder rejects (it needs a
+    /// keyframe to recover).
+    pub fn start(
+        on_frame: impl FnMut(RgbaImage) + Send + 'static,
+        on_error: impl FnMut() + Send + 'static,
+    ) -> Result<Self> {
         let decoder = VideoDecoder::new()?;
         let counters = Arc::new(Counters::default());
         let (tx, rx) = mpsc::channel();
@@ -384,7 +389,7 @@ impl VideoReceiver {
             let counters = counters.clone();
             std::thread::Builder::new()
                 .name("video-decoder".into())
-                .spawn(move || decode_loop(decoder, rx, on_frame, &counters))
+                .spawn(move || decode_loop(decoder, rx, on_frame, on_error, &counters))
                 .map_err(|e| crate::Error::Capture(e.to_string()))?
         };
         Ok(Self { tx: Some(tx), thread: Some(thread), counters })
@@ -416,6 +421,7 @@ fn decode_loop(
     mut decoder: VideoDecoder,
     rx: mpsc::Receiver<Packet>,
     mut on_frame: impl FnMut(RgbaImage),
+    mut on_error: impl FnMut(),
     counters: &Counters,
 ) {
     let mut queue = Vec::new();
@@ -441,6 +447,7 @@ fn decode_loop(
                 Err(err) => {
                     counters.errors.fetch_add(1, Ordering::Relaxed);
                     tracing::debug!("decode failed: {err}");
+                    on_error();
                 }
             }
         }
@@ -569,9 +576,12 @@ mod tests {
     #[test]
     fn receiver_decodes_on_its_own_thread_and_counts() {
         let (tx, rx) = mpsc::channel();
-        let receiver = VideoReceiver::start(move |image| {
-            let _ = tx.send((image.width, image.height));
-        })
+        let receiver = VideoReceiver::start(
+            move |image| {
+                let _ = tx.send((image.width, image.height));
+            },
+            || {},
+        )
         .unwrap();
 
         let mut encoder = VideoEncoder::with_preference(
@@ -591,6 +601,24 @@ mod tests {
 
         let decoded = 1 + rx.try_iter().count();
         assert!(decoded >= 3, "only {decoded} frames decoded");
+    }
+
+    /// A viewer whose decoder rejects data stays frozen until the next
+    /// keyframe; it must be told so it can ask for one right away.
+    #[test]
+    fn receiver_reports_frames_it_cannot_decode() {
+        let (tx, rx) = mpsc::channel();
+        let receiver = VideoReceiver::start(
+            |_| {},
+            move || {
+                let _ = tx.send(());
+            },
+        )
+        .unwrap();
+        // A slice of a picture the decoder never saw the start of.
+        receiver.push(vec![0, 0, 0, 1, 0x41, 0x9a, 0x02, 0x1c, 0xff, 0x37], false, None);
+        rx.recv_timeout(Duration::from_secs(5)).expect("no error reported");
+        assert_eq!(receiver.counters().snapshot().errors, 1);
     }
 
     #[test]

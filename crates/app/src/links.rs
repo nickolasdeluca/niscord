@@ -52,6 +52,8 @@ pub enum LinkEvent {
 
 enum Cmd {
     Signal(SignalData),
+    /// The decoder rejected a frame; only a keyframe gets the picture back.
+    RequestKeyframe,
     Close,
 }
 
@@ -193,12 +195,18 @@ impl Links {
     pub fn watch(self: &Arc<Self>, sharer: PeerId, volume: f32) -> anyhow::Result<()> {
         self.unwatch(sharer);
         let links = Arc::downgrade(self);
-        let receiver = Arc::new(VideoReceiver::start(move |image| {
-            if let Some(links) = links.upgrade() {
-                (links.ui)(LinkEvent::StreamFrame { sharer, image });
-            }
-        })?);
         let (tx, rx) = mpsc::unbounded_channel();
+        let errors = tx.clone();
+        let receiver = Arc::new(VideoReceiver::start(
+            move |image| {
+                if let Some(links) = links.upgrade() {
+                    (links.ui)(LinkEvent::StreamFrame { sharer, image });
+                }
+            },
+            move || {
+                let _ = errors.send(Cmd::RequestKeyframe);
+            },
+        )?);
         let volume = Arc::new(AtomicU32::new(volume.to_bits()));
         let incoming = Incoming { mailbox: tx, counters: receiver.counters(), volume: volume.clone() };
         self.incoming.lock().unwrap().insert(sharer, incoming);
@@ -405,9 +413,15 @@ async fn run_incoming(
             return;
         }
     };
-    while let Some(Cmd::Signal(data)) = rx.recv().await {
-        if let Err(err) = peer.handle_signal(data).await {
-            tracing::warn!(%sharer, "bad signal from sharer: {err:#}");
+    loop {
+        match rx.recv().await {
+            Some(Cmd::Signal(data)) => {
+                if let Err(err) = peer.handle_signal(data).await {
+                    tracing::warn!(%sharer, "bad signal from sharer: {err:#}");
+                }
+            }
+            Some(Cmd::RequestKeyframe) => peer.request_keyframe().await,
+            Some(Cmd::Close) | None => break,
         }
     }
     peer.close().await;
