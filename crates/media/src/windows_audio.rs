@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wasapi::{AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat, initialize_mta};
 
@@ -108,10 +108,21 @@ fn capture_loop(
     let frame_bytes = FRAME_LEN * 4;
     let mut queue: VecDeque<u8> = VecDeque::new();
     let mut frame = Vec::with_capacity(FRAME_LEN);
+    // Longest wait between wakeups; well above 20 ms means this thread is
+    // starved of CPU and audio leaves in bursts.
+    let (mut last_wake, mut max_gap, mut last_report) = (Instant::now(), Duration::ZERO, Instant::now());
     while !stop.load(Ordering::Relaxed) {
         // No event while the source is silent; just check `stop` again.
         if event.wait_for_event(100).is_err() {
+            last_wake = Instant::now();
             continue;
+        }
+        let now = Instant::now();
+        max_gap = max_gap.max(now - last_wake);
+        last_wake = now;
+        if now - last_report >= Duration::from_secs(2) {
+            tracing::debug!(max_gap_ms = max_gap.as_millis(), "audio capture");
+            (max_gap, last_report) = (Duration::ZERO, now);
         }
         loop {
             match capture.get_next_packet_size() {
@@ -230,9 +241,20 @@ fn playback_loop(
 
     let mut pcm = Vec::new();
     let mut bytes = Vec::new();
+    let mut last_report = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         if event.wait_for_event(100).is_err() {
             continue;
+        }
+        if last_report.elapsed() >= Duration::from_secs(2) {
+            last_report = Instant::now();
+            let buffer = buffer.lock().unwrap();
+            tracing::debug!(
+                buffered_ms = buffer.buffered().as_millis(),
+                speed = format!("{:.3}", buffer.speed()),
+                underruns = buffer.underruns(),
+                "audio playout"
+            );
         }
         let frames = match client.get_available_space_in_frames() {
             Ok(frames) => frames as usize,

@@ -57,6 +57,7 @@ impl PeerConnectionEventHandler for Handler {
 async fn receive_loop(track: Arc<dyn TrackRemote>, ssrc: u32, events: Arc<dyn IncomingEvents>) {
     let mut assembler = FrameAssembler::default();
     let mut last_request: Option<Instant> = None;
+    let mut last_keyframe: Option<Instant> = None;
     // Nothing decodes before the first keyframe; ask right away.
     request_keyframe(&track, ssrc, &mut last_request).await;
 
@@ -79,6 +80,11 @@ async fn receive_loop(track: Arc<dyn TrackRemote>, ssrc: u32, events: Arc<dyn In
                 request_keyframe(&track, ssrc, &mut last_request).await;
             }
             let keyframe = is_keyframe(&frame.data);
+            if keyframe {
+                let since_last_ms = last_keyframe.map(|t| now.duration_since(t).as_millis());
+                tracing::debug!(bytes = frame.data.len(), ?since_last_ms, "keyframe received");
+                last_keyframe = Some(now);
+            }
             events.frame(frame.data, keyframe);
         }
         // A gap with nothing decodable after it (e.g. the last packets of

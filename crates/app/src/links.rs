@@ -464,10 +464,17 @@ async fn fan_out_audio(links: Weak<Links>, mut packets: mpsc::UnboundedReceiver<
 async fn steer_bitrate(links: Weak<Links>) {
     let mut tick = tokio::time::interval(BITRATE_INTERVAL);
     loop {
-        tick.tick().await;
+        let due = tick.tick().await;
+        // How late the runtime got to us: large values mean Niscord is
+        // starved of CPU, which also delays every packet it sends.
+        let late_ms = due.elapsed().as_millis();
         let Some(links) = links.upgrade() else { return };
-        let estimate =
-            links.ready.lock().unwrap().values().filter(|p| p.is_connected()).map(|p| p.target_bitrate()).min();
+        let estimates: Vec<u32> =
+            links.ready.lock().unwrap().values().filter(|p| p.is_connected()).map(|p| p.target_bitrate()).collect();
+        if !estimates.is_empty() {
+            tracing::debug!(?estimates, late_ms, "bandwidth estimates");
+        }
+        let estimate = estimates.iter().copied().min();
         let mut encoder = links.encoder.lock().unwrap();
         let Some(encoder) = encoder.as_mut() else { continue };
         if let Some(target) = next_bitrate(estimate, encoder.max_bitrate, encoder.applied) {

@@ -341,6 +341,7 @@ impl App {
         if viewers > 0 {
             text += &format!(" · {viewers} watching");
         }
+        tracing::debug!(stats = %text, "sharing");
         self.update_tile(SELF_KEY, |tile| tile.stats = text.into());
     }
 }

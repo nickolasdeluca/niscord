@@ -174,6 +174,8 @@ pub struct PlayoutBuffer {
     /// Read position in frames from the front of `samples`; fractional while
     /// playing faster or slower than real time.
     position: f64,
+    /// Times playback ran dry, for diagnostics.
+    underruns: u64,
 }
 
 /// Fastest catch-up, as a change of playback speed: a third of a semitone
@@ -188,7 +190,14 @@ const DEADBAND: Duration = Duration::from_millis(10);
 impl PlayoutBuffer {
     pub fn new(target: Duration, max: Duration) -> Self {
         let to_len = |d: Duration| (d.as_secs_f64() * SAMPLE_RATE as f64) as usize * CHANNELS;
-        Self { samples: VecDeque::new(), target: to_len(target), max: to_len(max), playing: false, position: 0.0 }
+        Self {
+            samples: VecDeque::new(),
+            target: to_len(target),
+            max: to_len(max),
+            playing: false,
+            position: 0.0,
+            underruns: 0,
+        }
     }
 
     pub fn push(&mut self, pcm: &[f32]) {
@@ -230,12 +239,17 @@ impl PlayoutBuffer {
         out[written..].fill(0.0);
         if written < out.len() {
             // Underrun: rebuild the cushion before playing again.
+            self.underruns += self.playing as u64;
             self.playing = false;
         }
     }
 
+    pub fn underruns(&self) -> u64 {
+        self.underruns
+    }
+
     /// Playback speed that steers the queue back towards the target.
-    fn speed(&self) -> f64 {
+    pub fn speed(&self) -> f64 {
         let off = (self.samples.len() as f64 - self.target as f64) / CHANNELS as f64 / SAMPLE_RATE as f64;
         if off.abs() < DEADBAND.as_secs_f64() {
             return 1.0;
