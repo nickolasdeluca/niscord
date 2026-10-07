@@ -3,9 +3,9 @@ name: Release
 # Push a tag like v0.1.0 to build and publish a release:
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Set the repository variable NISCORD_DEFAULT_SERVER (Settings > Secrets and
-# variables > Actions > Variables), e.g. wss://niscord.example.com, so the
-# app comes with your server filled in.
+# Releases are public, so they are built without NISCORD_DEFAULT_SERVER and
+# never carry a server address. Build locally with it set for a private build
+# that comes with your server filled in.
 
 on:
   push:
@@ -19,8 +19,6 @@ jobs:
   windows:
     name: Windows app and server
     runs-on: windows-latest
-    env:
-      NISCORD_DEFAULT_SERVER: ${{ vars.NISCORD_DEFAULT_SERVER }}
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/setup-nasm@v1
