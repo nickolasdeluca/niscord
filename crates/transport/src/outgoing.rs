@@ -21,6 +21,7 @@ use webrtc::peer_connection::{PeerConnection, PeerConnectionEventHandler, RTCPee
 use webrtc::rtp_transceiver::RtpSender;
 
 use crate::common::{self, BaseHandler, CandidateBuffer};
+use crate::pacer::AudioFirstPacer;
 use crate::{OutgoingEvents, SignalData, TransportConfig, forwarder};
 
 /// Bounds for the bandwidth estimate, in bits per second.
@@ -161,7 +162,8 @@ impl OutgoingPeer {
             inner: Gcc::new(limits.initial as f64, limits.min as f64, limits.max as f64),
             target: target_bitrate.clone(),
         };
-        let registry = configure_congestion_control(Registry::new(), estimator, CongestionFeedback::Twcc, &mut engine)?;
+        let registry = configure_congestion_control(Registry::new(), estimator, CongestionFeedback::Twcc, &mut engine)?
+            .with(Slot::Pacer, AudioFirstPacer::new(limits.initial as f64));
         let registry = register_default_interceptors(registry, &mut engine)?;
         let registry = registry.with(Slot::from(forwarder::SLOT), forwarder::KeyframeRequestForwarder::default());
 

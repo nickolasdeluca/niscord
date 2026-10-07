@@ -16,6 +16,7 @@ mod common;
 mod forwarder;
 mod incoming;
 mod outgoing;
+mod pacer;
 
 use bytes::Bytes;
 pub use niscord_protocol::{IceServer, SignalData};
