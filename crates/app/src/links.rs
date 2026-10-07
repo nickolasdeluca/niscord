@@ -288,6 +288,7 @@ impl PeerEvents for ToViewer {
 
 impl OutgoingEvents for ToViewer {
     fn keyframe_requested(&self) {
+        tracing::debug!(viewer = %self.viewer, "keyframe requested");
         if let Some(links) = self.links.upgrade() {
             links.request_keyframe();
         }

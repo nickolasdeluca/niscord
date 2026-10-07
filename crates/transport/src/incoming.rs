@@ -59,7 +59,7 @@ async fn receive_loop(track: Arc<dyn TrackRemote>, ssrc: u32, events: Arc<dyn In
     let mut last_request: Option<Instant> = None;
     let mut last_keyframe: Option<Instant> = None;
     // Nothing decodes before the first keyframe; ask right away.
-    request_keyframe(&track, ssrc, &mut last_request).await;
+    request_keyframe(&track, ssrc, &mut last_request, "joined").await;
 
     loop {
         let event = match tokio::time::timeout(TICK, track.poll()).await {
@@ -76,8 +76,7 @@ async fn receive_loop(track: Arc<dyn TrackRemote>, ssrc: u32, events: Arc<dyn In
         }
         for frame in assembler.pop(now) {
             if frame.after_loss {
-                tracing::debug!("lost packets, asking for keyframe");
-                request_keyframe(&track, ssrc, &mut last_request).await;
+                request_keyframe(&track, ssrc, &mut last_request, "lost packets").await;
             }
             let keyframe = is_keyframe(&frame.data);
             if keyframe {
@@ -90,7 +89,7 @@ async fn receive_loop(track: Arc<dyn TrackRemote>, ssrc: u32, events: Arc<dyn In
         // A gap with nothing decodable after it (e.g. the last packets of
         // the newest frame were lost and the screen is static).
         if assembler.stalled(now) {
-            request_keyframe(&track, ssrc, &mut last_request).await;
+            request_keyframe(&track, ssrc, &mut last_request, "frame stuck").await;
         }
     }
 }
@@ -140,11 +139,12 @@ impl AudioSequence {
     }
 }
 
-async fn request_keyframe(track: &Arc<dyn TrackRemote>, ssrc: u32, last: &mut Option<Instant>) {
+async fn request_keyframe(track: &Arc<dyn TrackRemote>, ssrc: u32, last: &mut Option<Instant>, reason: &str) {
     if last.is_some_and(|t| t.elapsed() < KEYFRAME_REQUEST_INTERVAL) {
         return;
     }
     *last = Some(Instant::now());
+    tracing::debug!(reason, "asking for keyframe");
     let pli = PictureLossIndication { sender_ssrc: 0, media_ssrc: ssrc };
     if let Err(err) = track.write_rtcp(vec![Box::new(pli)]).await {
         tracing::debug!("could not request keyframe: {err}");
@@ -206,7 +206,7 @@ impl IncomingPeer {
     pub async fn request_keyframe(&self) {
         let track = self.track.lock().unwrap().clone();
         if let Some((track, ssrc)) = track {
-            request_keyframe(&track, ssrc, &mut *self.last_request.lock().await).await;
+            request_keyframe(&track, ssrc, &mut *self.last_request.lock().await, "can't decode").await;
         }
     }
 

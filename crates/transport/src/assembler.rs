@@ -71,8 +71,7 @@ impl FrameAssembler {
                     }
                 }
                 Err(gap) => {
-                    let oldest = self.packets.values().map(|(t, _)| *t).min();
-                    if oldest.is_some_and(|t| now.duration_since(t) >= MAX_GAP_WAIT) && self.skip_past(gap) {
+                    if self.waited_out(gap, now) && self.skip_past(gap) {
                         continue;
                     }
                     break;
@@ -85,7 +84,23 @@ impl FrameAssembler {
     /// Packets have been missing for long enough that nothing more will come
     /// out without a keyframe.
     pub fn stalled(&self, now: Instant) -> bool {
-        self.packets.values().any(|(t, _)| now.duration_since(*t) >= MAX_GAP_WAIT)
+        match self.next {
+            Some(next) => self.complete_frame(next).is_err_and(|gap| self.waited_out(gap, now)),
+            // No frame start yet (joined mid-frame, or the first one was lost).
+            None => self.packets.values().any(|(t, _)| now.duration_since(*t) >= MAX_GAP_WAIT),
+        }
+    }
+
+    /// Whether the packet at `gap` has been missing for too long: counted
+    /// from when something after it arrived or, when it's the end of the
+    /// frame that's missing, from the last arrival. Not from the frame's
+    /// first packet: a big keyframe takes a while to arrive at the paced
+    /// rate, and asking for another one because of that just made the next
+    /// one late too (a keyframe a second on a CS2 stream).
+    fn waited_out(&self, gap: u64, now: Instant) -> bool {
+        let first_after = self.packets.range(gap..).next().map(|(_, (t, _))| *t);
+        let since = first_after.or_else(|| self.packets.values().map(|(t, _)| *t).max());
+        since.is_some_and(|t| now.duration_since(t) >= MAX_GAP_WAIT)
     }
 
     fn extend(&mut self, seq: u16) -> u64 {
@@ -307,5 +322,39 @@ mod tests {
         let frames = asm.pop(later);
         assert_eq!(frames.len(), 1, "frame 2 is skipped, frame 3 is emitted");
         assert!(frames[0].after_loss);
+    }
+
+    #[test]
+    fn a_slowly_arriving_frame_is_not_a_stall() {
+        let mut asm = FrameAssembler::default();
+        let t0 = Instant::now();
+        let mut seq = 0;
+        // A keyframe trickling in over a second, one packet every 25 ms.
+        let keyframe = packets(&mut seq, 1000, 48_000);
+        let n = keyframe.len();
+        let mut frames = Vec::new();
+        for (i, p) in keyframe.into_iter().enumerate() {
+            let now = t0 + Duration::from_millis(25 * i as u64);
+            asm.push(now, p);
+            frames.extend(asm.pop(now));
+            assert!(!asm.stalled(now + Duration::from_millis(24)), "stalled after packet {i} of {n}");
+        }
+        assert_eq!(frames.len(), 1);
+        assert!(!frames[0].after_loss);
+    }
+
+    #[test]
+    fn a_lost_end_of_frame_stalls_once_nothing_more_arrives() {
+        let mut asm = FrameAssembler::default();
+        let t0 = Instant::now();
+        let mut seq = 0;
+        let mut frame = packets(&mut seq, 1000, 4000);
+        frame.pop();
+        for p in frame {
+            asm.push(t0, p);
+        }
+        assert!(asm.pop(t0).is_empty());
+        assert!(!asm.stalled(t0 + Duration::from_millis(100)));
+        assert!(asm.stalled(t0 + MAX_GAP_WAIT));
     }
 }
