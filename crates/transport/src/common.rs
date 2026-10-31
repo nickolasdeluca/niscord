@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS, MediaEngine};
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::{RTCIceCandidate, RTCIceCandidateInit, RTCIceServer};
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
@@ -56,6 +57,13 @@ pub fn media_engine() -> Result<MediaEngine> {
     Ok(engine)
 }
 
+/// How far behind the newest packet an incoming packet may arrive and still
+/// be accepted. A retransmission always arrives behind: at 8 Mbps the 64
+/// webrtc-rs uses by default is 80 ms of packets, so most retransmissions
+/// were discarded as replays. Covers the NACK generator's whole 512-packet
+/// history.
+const SRTP_REPLAY_WINDOW: usize = 1024;
+
 pub async fn build_peer_connection(
     config: &TransportConfig,
     engine: MediaEngine,
@@ -72,8 +80,10 @@ pub async fn build_peer_connection(
         })
         .collect();
     let rtc_config = RTCConfigurationBuilder::new().with_ice_servers(ice_servers).build();
+    let settings = SettingEngineBuilder::new().with_srtp_replay_protection_window(SRTP_REPLAY_WINDOW).build();
     let pc = PeerConnectionBuilder::new()
         .with_configuration(rtc_config)
+        .with_setting_engine(settings)
         .with_media_engine(engine)
         .with_interceptor_registry(registry)
         .with_handler(handler)

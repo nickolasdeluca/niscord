@@ -22,7 +22,7 @@ use webrtc::rtp_transceiver::RtpSender;
 
 use crate::common::{self, BaseHandler, CandidateBuffer};
 use crate::pacer::AudioFirstPacer;
-use crate::{OutgoingEvents, SignalData, TransportConfig, forwarder};
+use crate::{OutgoingEvents, SignalData, TransportConfig, forwarder, lossy};
 
 /// Bounds for the bandwidth estimate, in bits per second.
 #[derive(Debug, Clone, Copy)]
@@ -165,7 +165,10 @@ impl OutgoingPeer {
         let registry = configure_congestion_control(Registry::new(), estimator, CongestionFeedback::Twcc, &mut engine)?
             .with(Slot::Pacer, AudioFirstPacer::new(limits.initial as f64));
         let registry = register_default_interceptors(registry, &mut engine)?;
-        let registry = registry.with(Slot::from(forwarder::SLOT), forwarder::KeyframeRequestForwarder::default());
+        let mut registry = registry.with(Slot::from(forwarder::SLOT), forwarder::KeyframeRequestForwarder::default());
+        if let Some(loss) = &config.simulated_loss {
+            registry = registry.with(Slot::from(lossy::SLOT), lossy::LossyLink::new(loss.clone()));
+        }
 
         let connected = Arc::new(AtomicBool::new(false));
         let handler = Arc::new(Handler {

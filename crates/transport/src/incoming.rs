@@ -4,11 +4,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtc::interceptor::{NackGeneratorBuilder, Registry, Slot};
+use rtc::peer_connection::configuration::interceptor_registry::{
+    configure_rtcp_reports, configure_simulcast_extension_headers, configure_twcc_receiver_only,
+};
+use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::rtp_transceiver::rtp_sender::{RTCPFeedback, RtpCodecKind, TYPE_RTCP_FB_NACK};
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use webrtc::peer_connection::{PeerConnection, PeerConnectionEventHandler, RTCPeerConnectionState};
 
@@ -151,6 +154,31 @@ async fn request_keyframe(track: &Arc<dyn TrackRemote>, ssrc: u32, last: &mut Op
     }
 }
 
+/// How many times to ask for one lost packet. Requests go out every 100 ms
+/// and the frame assembler gives up on a gap after 250 ms, so more are
+/// useless. webrtc-rs asks without limit, which on a congested link resends
+/// the same packets every 100 ms until they leave its 512-packet history:
+/// retransmissions crowd out new video, the link stays congested, and the
+/// stream never recovers.
+const MAX_NACKS_PER_PACKET: u16 = 3;
+
+/// webrtc-rs's default interceptors (NACK, the TWCC feedback the sharer's
+/// bandwidth estimator relies on, RTCP reports), with requests for lost
+/// packets bounded.
+fn viewer_interceptors(engine: &mut MediaEngine) -> Result<Registry> {
+    for parameter in ["", "pli"] {
+        engine.register_feedback(
+            RTCPFeedback { typ: TYPE_RTCP_FB_NACK.to_owned(), parameter: parameter.to_owned() },
+            RtpCodecKind::Video,
+        );
+    }
+    let registry = Registry::new()
+        .with(Slot::NackGenerator, NackGeneratorBuilder::new().with_max_nacks_per_packet(MAX_NACKS_PER_PACKET).build());
+    configure_simulcast_extension_headers(engine)?;
+    let registry = configure_twcc_receiver_only(registry, engine)?;
+    Ok(configure_rtcp_reports(registry))
+}
+
 pub struct IncomingPeer {
     pc: Arc<dyn PeerConnection>,
     events: Arc<dyn IncomingEvents>,
@@ -163,9 +191,7 @@ impl IncomingPeer {
     /// Create the connection; it waits for the sharer's offer.
     pub async fn start(config: &TransportConfig, events: Arc<dyn IncomingEvents>) -> Result<Self> {
         let mut engine = common::media_engine()?;
-        // Defaults include the NACK generator and TWCC feedback the sharer's
-        // bandwidth estimator relies on.
-        let registry = register_default_interceptors(Registry::new(), &mut engine)?;
+        let registry = viewer_interceptors(&mut engine)?;
         let track = RemoteTrack::default();
         let handler = Arc::new(Handler {
             base: BaseHandler { events: events.clone() },

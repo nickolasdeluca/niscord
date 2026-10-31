@@ -15,8 +15,12 @@ mod assembler;
 mod common;
 mod forwarder;
 mod incoming;
+mod lossy;
 mod outgoing;
 mod pacer;
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 
 use bytes::Bytes;
 pub use niscord_protocol::{IceServer, SignalData};
@@ -30,16 +34,34 @@ pub struct TransportConfig {
     /// Local address to bind UDP sockets to. `0.0.0.0:0` uses every
     /// interface; `127.0.0.1:0` keeps traffic on this machine (tests).
     pub udp_addr: String,
+    /// Tests only: a sharer loses video packets on the way out.
+    #[doc(hidden)]
+    pub simulated_loss: Option<SimulatedLoss>,
+}
+
+/// Tests only: lose outgoing video packets like a congested link, since
+/// loopback never loses any.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct SimulatedLoss {
+    /// Lose every n-th video packet.
+    pub every: u32,
+    /// Lose its retransmissions too, not just the first transmission.
+    pub permanent: bool,
+    /// Counts packets lost (first transmissions).
+    pub lost: Arc<AtomicU32>,
+    /// Counts retransmissions of lost packets the sharer sent.
+    pub retransmissions: Arc<AtomicU32>,
 }
 
 impl TransportConfig {
     pub fn new(ice_servers: Vec<IceServer>) -> Self {
-        Self { ice_servers, udp_addr: "0.0.0.0:0".into() }
+        Self { ice_servers, udp_addr: "0.0.0.0:0".into(), simulated_loss: None }
     }
 
     /// Loopback only, no STUN/TURN: for tests on one machine.
     pub fn loopback() -> Self {
-        Self { ice_servers: Vec::new(), udp_addr: "127.0.0.1:0".into() }
+        Self { udp_addr: "127.0.0.1:0".into(), ..Self::new(Vec::new()) }
     }
 }
 
