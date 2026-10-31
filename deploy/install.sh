@@ -147,9 +147,16 @@ fi
 step "Writing $ENV_FILE"
 OLD_PASSWORD=""
 OLD_SECRET=""
+OLD_CLIENT_LOGS=""
 if [[ -f $ENV_FILE ]]; then
     OLD_PASSWORD="$(sed -n 's/^NISCORD_PASSWORD="\(.*\)"$/\1/p' "$ENV_FILE")"
     OLD_SECRET="$(sed -n 's/^NISCORD_TURN_SECRET="\(.*\)"$/\1/p' "$ENV_FILE")"
+    OLD_CLIENT_LOGS="$(sed -n 's/^NISCORD_CLIENT_LOGS="\(.*\)"$/\1/p' "$ENV_FILE")"
+fi
+if [[ -n $OLD_CLIENT_LOGS ]]; then
+    CLIENT_LOGS_LINE="NISCORD_CLIENT_LOGS=\"$OLD_CLIENT_LOGS\""
+else
+    CLIENT_LOGS_LINE='#NISCORD_CLIENT_LOGS="info,niscord=debug"'
 fi
 PASSWORD="${PASSWORD:-${OLD_PASSWORD:-$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-16)}}"
 TURN_SECRET="${OLD_SECRET:-$(openssl rand -hex 32)}"
@@ -165,6 +172,10 @@ NISCORD_STUN_URLS="stun:$DOMAIN:3478"
 NISCORD_TURN_URLS="turn:$DOMAIN:3478?transport=udp"
 NISCORD_TURN_SECRET="$TURN_SECRET"
 RUST_LOG="info"
+# Uncomment to have the apps send their logs (at this filter) to
+# /var/log/niscord/clients, for diagnosing problems. Apps pick it up when
+# they reconnect, which they do by themselves after the restart.
+$CLIENT_LOGS_LINE
 EOF
 umask 022
 

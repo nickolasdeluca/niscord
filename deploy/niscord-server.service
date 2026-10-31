@@ -10,6 +10,8 @@ ExecStart=/usr/local/bin/niscord-server
 EnvironmentFile=/etc/niscord/niscord.env
 Restart=on-failure
 RestartSec=2
+# /var/log/niscord: client logs, when NISCORD_CLIENT_LOGS asks for them.
+LogsDirectory=niscord
 
 # It only needs to accept connections on localhost (Caddy fronts it).
 DynamicUser=yes

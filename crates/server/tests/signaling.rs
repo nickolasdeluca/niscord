@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use niscord_protocol::{ClientMsg, ErrorCode, PROTOCOL_VERSION, PeerId, Role, ServerMsg, ShareKind, SignalData};
-use niscord_server::Config;
+use niscord_server::{ClientLogs, Config};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -154,4 +154,67 @@ async fn disconnecting_sharer_ends_share_for_viewers() {
     drop(ana);
     assert_eq!(bia.recv_non_peers().await, ServerMsg::ShareEnded { from: ana_id });
     bia.wait_peers(|p| p.len() == 1 && p[0].id == bia_id).await;
+}
+
+/// Join and return the `log_filter` from the welcome.
+async fn join_for_logs(url: &str, name: &str) -> (TestClient, PeerId, Option<String>) {
+    let mut c = TestClient::connect(url).await;
+    c.send(ClientMsg::Hello { name: name.into(), password: String::new(), protocol: PROTOCOL_VERSION }).await;
+    match c.recv().await {
+        ServerMsg::Welcome { id, log_filter, .. } => (c, id, log_filter),
+        other => panic!("expected welcome, got {other:?}"),
+    }
+}
+
+/// Send `lines`, then wait for a later message's effect: the server handles
+/// one connection's messages in order, so the lines are on disk by then.
+async fn send_log(c: &mut TestClient, id: PeerId, lines: &[&str]) {
+    c.send(ClientMsg::Log { lines: lines.iter().map(|l| l.to_string()).collect() }).await;
+    c.send(ClientMsg::ShareStart { kind: ShareKind::Screen, title: "x".into(), audio: false }).await;
+    c.wait_peers(|p| p.iter().any(|p| p.id == id && p.share.is_some())).await;
+    c.send(ClientMsg::ShareStop).await;
+    c.wait_peers(|p| p.iter().any(|p| p.id == id && p.share.is_none())).await;
+}
+
+#[tokio::test]
+async fn client_logs_are_requested_and_written() {
+    let dir = std::env::temp_dir().join(format!("niscord-logs-{}", uuid::Uuid::new_v4()));
+    let logs = ClientLogs { filter: "info,niscord=debug".into(), dir: dir.clone() };
+    let url = start(Config { client_logs: Some(logs), ..Default::default() }).await;
+
+    let (mut ana, ana_id, filter) = join_for_logs(&url, "Ana").await;
+    assert_eq!(filter.as_deref(), Some("info,niscord=debug"));
+    send_log(
+        &mut ana,
+        ana_id,
+        &[
+            "first line",
+            "second line
+",
+        ],
+    )
+    .await;
+    send_log(&mut ana, ana_id, &["third line"]).await;
+
+    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    let text = std::fs::read_to_string(&files[0]).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(files.len(), 1);
+    assert!(files[0].to_string_lossy().ends_with(&format!("_Ana_{}.log", &ana_id.simple().to_string()[..8])));
+    assert_eq!(
+        text,
+        "first line
+second line
+third line
+"
+    );
+}
+
+#[tokio::test]
+async fn client_logs_are_ignored_unless_enabled() {
+    let url = start(Config::default()).await;
+    let (mut ana, ana_id, filter) = join_for_logs(&url, "Ana").await;
+    assert_eq!(filter, None);
+    // Still served normally afterwards.
+    send_log(&mut ana, ana_id, &["nobody asked"]).await;
 }

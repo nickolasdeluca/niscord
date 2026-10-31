@@ -42,6 +42,11 @@ impl State {
         id
     }
 
+    /// The display name, once the client has joined.
+    pub fn name(&self, id: PeerId) -> Option<String> {
+        self.clients.get(&id)?.name.clone()
+    }
+
     pub fn remove_client(&mut self, id: PeerId) {
         let Some(client) = self.clients.remove(&id) else { return };
         let Some(name) = client.name else { return };
@@ -107,6 +112,8 @@ impl State {
                     self.send(to, ServerMsg::Signal { from: id, role, data });
                 }
             }
+            // Written by the connection itself, outside this lock.
+            ClientMsg::Log { .. } => {}
         }
     }
 
@@ -134,7 +141,15 @@ impl State {
 
         tracing::info!(%id, %addr, name, "joined");
         self.clients.get_mut(&id).unwrap().name = Some(name);
-        self.send(id, ServerMsg::Welcome { id, protocol: PROTOCOL_VERSION, ice_servers: config.ice_servers_for(id) });
+        self.send(
+            id,
+            ServerMsg::Welcome {
+                id,
+                protocol: PROTOCOL_VERSION,
+                ice_servers: config.ice_servers_for(id),
+                log_filter: config.client_logs.as_ref().map(|logs| logs.filter.clone()),
+            },
+        );
         self.broadcast_peers();
     }
 

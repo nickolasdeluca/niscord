@@ -103,6 +103,10 @@ pub enum ClientMsg {
         role: Role,
         data: SignalData,
     },
+    /// Log lines, sent only when the server asked for them in `welcome`.
+    Log {
+        lines: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +124,10 @@ pub enum ServerMsg {
         id: PeerId,
         protocol: u32,
         ice_servers: Vec<IceServer>,
+        /// When set, the client sends its log lines matching this
+        /// `RUST_LOG`-style filter to the server, for remote diagnostics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log_filter: Option<String>,
     },
     /// Fatal: the server closes the connection right after sending it.
     Error {

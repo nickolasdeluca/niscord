@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use niscord_server::Config;
+use niscord_server::{ClientLogs, Config};
 use tracing_subscriber::EnvFilter;
 
 fn env(name: &str) -> Option<String> {
@@ -34,6 +34,14 @@ async fn main() -> anyhow::Result<()> {
         turn_urls: env_list("NISCORD_TURN_URLS", ""),
         turn_secret: env("NISCORD_TURN_SECRET").unwrap_or_default(),
         turn_ttl: Duration::from_secs(turn_ttl),
+        client_logs: env("NISCORD_CLIENT_LOGS").map(|filter| ClientLogs {
+            filter,
+            // systemd's LogsDirectory= sets LOGS_DIRECTORY.
+            dir: env("NISCORD_CLIENT_LOG_DIR")
+                .or_else(|| env("LOGS_DIRECTORY").map(|dir| format!("{dir}/clients")))
+                .unwrap_or_else(|| "client-logs".into())
+                .into(),
+        }),
     };
 
     let listener = tokio::net::TcpListener::bind(&bind).await.with_context(|| format!("binding {bind}"))?;
@@ -45,6 +53,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("TURN is not configured: peers behind strict NATs may fail to connect");
     } else {
         tracing::info!(urls = ?config.turn_urls, "TURN enabled");
+    }
+    if let Some(logs) = &config.client_logs {
+        tracing::info!(filter = logs.filter, dir = %logs.dir.display(), "collecting client logs");
     }
 
     tokio::select! {

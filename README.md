@@ -185,6 +185,13 @@ The server is a single binary configured through environment variables:
 | `NISCORD_TURN_SECRET` | *(empty)* | coturn `static-auth-secret`; clients get short-lived credentials derived from it |
 | `NISCORD_TURN_TTL_SECONDS` | `43200` | Lifetime of those credentials |
 | `RUST_LOG` | `info` | Log verbosity |
+| `NISCORD_CLIENT_LOGS` | *(empty)* | When set, connected apps send their log lines matching this `RUST_LOG`-style filter (e.g. `info,niscord=debug`) to the server |
+| `NISCORD_CLIENT_LOG_DIR` | `$LOGS_DIRECTORY/clients`, else `client-logs` | Where those logs go: one file per connection, capped at 64 MB, never deleted by the server |
+
+Client logs are for diagnosing problems (choppy streams, failed connections) on
+friends' machines without asking them for files. They include display names and the
+IP addresses peers use to connect, so turn them on only while you need them and tell
+your friends when you do.
 
 ```sh
 cargo build --release -p niscord-server

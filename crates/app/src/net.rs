@@ -16,6 +16,8 @@ use tokio_tungstenite::tungstenite::Message;
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
+/// How often queued log lines go to the server, when it asked for them.
+const LOG_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct Params {
@@ -154,6 +156,7 @@ async fn connect_once(
         return End::Lost(err.to_string());
     }
 
+    let mut log_tick = tokio::time::interval(LOG_INTERVAL);
     loop {
         tokio::select! {
             frame = tokio::time::timeout(READ_TIMEOUT, ws.next()) => {
@@ -176,8 +179,9 @@ async fn connect_once(
                     }
                 };
                 match msg {
-                    ServerMsg::Welcome { id, ice_servers, .. } => {
+                    ServerMsg::Welcome { id, ice_servers, log_filter, .. } => {
                         *joined = true;
+                        crate::logging::set_remote_filter(log_filter.as_deref());
                         on_event(Event::Joined { id, ice_servers });
                     }
                     ServerMsg::Error { message, .. } => return End::Rejected(message),
@@ -187,10 +191,23 @@ async fn connect_once(
             }
             msg = rx.recv() => {
                 let Some(msg) = msg else {
+                    // What led up to closing is often why someone looks.
+                    let lines = crate::logging::take_remote_lines();
+                    if *joined && !lines.is_empty() {
+                        let _ = ws.send(Message::text(ClientMsg::Log { lines }.to_json())).await;
+                    }
                     let _ = ws.close(None).await;
                     return End::Closed;
                 };
                 if let Err(err) = ws.send(Message::text(msg.to_json())).await {
+                    return End::Lost(err.to_string());
+                }
+            }
+            _ = log_tick.tick(), if *joined => {
+                let lines = crate::logging::take_remote_lines();
+                if !lines.is_empty()
+                    && let Err(err) = ws.send(Message::text(ClientMsg::Log { lines }.to_json())).await
+                {
                     return End::Lost(err.to_string());
                 }
             }

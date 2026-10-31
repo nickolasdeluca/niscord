@@ -4,6 +4,7 @@
 //! between clients. Media never flows through this process: it goes
 //! peer-to-peer, or through a TURN server when a direct path is impossible.
 
+mod client_logs;
 mod state;
 
 use std::net::SocketAddr;
@@ -20,6 +21,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 
+use crate::client_logs::ClientLog;
+pub use crate::client_logs::ClientLogs;
 use crate::state::{Outgoing, State};
 
 /// Largest WebSocket message accepted from a client.
@@ -38,6 +41,8 @@ pub struct Config {
     /// coturn `static-auth-secret`, used to mint short-lived credentials.
     pub turn_secret: String,
     pub turn_ttl: Duration,
+    /// Ask clients to send their logs here.
+    pub client_logs: Option<ClientLogs>,
 }
 
 impl Config {
@@ -98,6 +103,7 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, shared: Arc<Shar
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
     let id = shared.state.lock().unwrap().add_client(tx);
+    let mut log = ClientLog::new();
 
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -149,6 +155,15 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, shared: Arc<Shar
             tracing::debug!(%addr, "ignoring malformed message");
             continue;
         };
+        if let ClientMsg::Log { lines } = &msg {
+            let name = shared.state.lock().unwrap().name(id);
+            if let (Some(logs), Some(name)) = (&shared.config.client_logs, name)
+                && let Err(err) = log.append(&logs.dir, &name, id, lines)
+            {
+                tracing::warn!(%id, "writing client log: {err}");
+            }
+            continue;
+        }
         shared.state.lock().unwrap().handle(id, msg, addr, &shared.config);
     }
 
