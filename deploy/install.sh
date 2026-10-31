@@ -6,10 +6,11 @@
 #   * coturn          STUN/TURN relay for friends who can't connect directly
 #
 # Run it from a copy of the source tree; it builds the server unless you pass
-# a ready binary. Safe to re-run (e.g. to update): the password and TURN
-# secret are kept unless you pass new ones.
+# a ready binary. Safe to re-run (e.g. to update): the domain, password and
+# TURN secret are kept unless you pass new ones.
 #
 #   sudo deploy/install.sh --domain niscord.example.com [--password PW] [--binary PATH]
+#   sudo deploy/install.sh [--binary PATH]     (update an existing install)
 
 set -euo pipefail
 
@@ -18,7 +19,7 @@ RELAY_MAX=49200
 ENV_FILE=/etc/niscord/niscord.env
 
 usage() {
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
 }
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -41,7 +42,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ $EUID -eq 0 ]] || die "run this with sudo"
-[[ -n $DOMAIN ]] || die "--domain is required (see --help)"
+if [[ -z $DOMAIN && -f $ENV_FILE ]]; then
+    # Written by an earlier run as NISCORD_STUN_URLS="stun:<domain>:3478".
+    DOMAIN="$(sed -n 's/^NISCORD_STUN_URLS="stun:\([^:"]*\):3478"$/\1/p' "$ENV_FILE")"
+    if [[ -n $DOMAIN ]]; then
+        echo "Using the domain from $ENV_FILE: $DOMAIN"
+    fi
+fi
+[[ -n $DOMAIN ]] || die "--domain is required on a first install (see --help)"
 [[ $DOMAIN =~ ^[A-Za-z0-9.-]+$ ]] || die "--domain should be a bare host name like niscord.example.com"
 [[ $PASSWORD != *[\"\\\$\`]* && $PASSWORD != *$'\n'* ]] || die "the password can't contain quotes, \$, \` or backslashes"
 command -v apt-get > /dev/null || die "this script supports Ubuntu/Debian (apt) only"

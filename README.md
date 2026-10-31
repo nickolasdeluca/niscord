@@ -166,8 +166,9 @@ source, so it only needs a copy of this repository.
 
 It prints the server address (`wss://niscord.example.com`) and a generated password
 for your friends; pass `--password` to choose your own. To update later, copy the new
-source and run the script again: it keeps the password and TURN secret. With a
-release binary instead of building, pass `--binary ./niscord-server-linux-x86_64`.
+source and run the script again (`sudo deploy/install.sh`): it keeps the domain, password
+and TURN secret. With a release binary instead of building, pass
+`--binary ./niscord-server-linux-x86_64`.
 
 Settings live in `/etc/niscord/niscord.env` (`sudo systemctl restart niscord-server`
 after editing); logs with `journalctl -u niscord-server -f`.
