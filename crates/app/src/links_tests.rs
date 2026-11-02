@@ -181,4 +181,33 @@ fn bitrate_follows_slowest_viewer_within_bounds() {
     assert_eq!(next_bitrate(Some(2_050_000), max, Some(1_550_000)), None);
     // A preset below the floor is respected.
     assert_eq!(next_bitrate(Some(50_000), 100_000, None), Some(100_000));
+    // A viewer whose estimate reached its ceiling gets all the limit allows.
+    assert_eq!(next_bitrate(Some(max_estimate(max)), max, None), Some(max));
+}
+
+#[tokio::test]
+async fn bitrate_limit_follows_the_frames_not_the_size_at_the_start() {
+    let (signaling, _keep_open) = mpsc::unbounded_channel();
+    let links = Links::new(Handle::current(), signaling, |_| {});
+    // A minimized game reports a tiny window, then sends 720p once it's back.
+    links.set_encoder(Some(SenderControl::detached()), suggested_bitrate(160, 28, 30));
+    links.encoding_size(1280, 720, 30);
+
+    let expected = suggested_bitrate(1280, 720, 30);
+    assert!(expected > 1_900_000);
+    let applied = || links.encoder.lock().unwrap().as_ref().unwrap().applied;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while applied() != Some(expected) {
+        assert!(tokio::time::Instant::now() < deadline, "encoder is at {:?}", applied());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Resizing the window down lowers it again.
+    links.encoding_size(640, 360, 30);
+    let smaller = suggested_bitrate(640, 360, 30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while applied() != Some(smaller) {
+        assert!(tokio::time::Instant::now() < deadline, "encoder is at {:?}", applied());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

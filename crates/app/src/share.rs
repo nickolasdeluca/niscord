@@ -47,7 +47,9 @@ fn to_pixel_buffer(image: &RgbaImage) -> SharedPixelBuffer<Rgba8Pixel> {
     SharedPixelBuffer::clone_from_slice(&image.pixels, image.width, image.height)
 }
 
-/// Stream settings for a quality preset.
+/// Stream settings for a quality preset. The bitrate is only a first guess: a
+/// minimized window reports a tiny size, so `Links::encoding_size` corrects it
+/// from the first real frame.
 fn stream_settings(source: &Source, resolution: Resolution, fps: u32) -> StreamSettings {
     let (max_width, max_height) = resolution.max_size();
     // Budget bits for the size frames will actually have, not the preset box.
@@ -171,10 +173,18 @@ impl App {
                     loopback: receiver.clone(),
                     preview: self.preview.clone(),
                     links: links.clone(),
+                    fps,
                     frame_interval: Duration::from_secs(1) / fps.max(1),
                     last_capture: None,
                 };
-                tracing::info!(title = source.title, ?settings, "sharing");
+                tracing::info!(
+                    title = source.title,
+                    width = source.width,
+                    height = source.height,
+                    minimized = source.minimized,
+                    ?settings,
+                    "sharing"
+                );
                 VideoSender::start(source.id, settings, sink).map(|sender| (sender, receiver))
             });
         let (sender, receiver) = match started {
@@ -354,6 +364,7 @@ struct StreamSink {
     /// Whether the preview is shown; when not, skip decoding it.
     preview: Arc<AtomicBool>,
     links: Option<Arc<Links>>,
+    fps: u32,
     frame_interval: Duration,
     last_capture: Option<Instant>,
 }
@@ -364,6 +375,7 @@ impl EncodedSink for StreamSink {
             self.loopback.push(frame.data.clone(), frame.keyframe, Some(captured_at));
         }
         if let Some(links) = &self.links {
+            links.encoding_size(frame.width, frame.height, self.fps);
             // RTP timestamps advance by the real gap between captures, so
             // viewers play frames at the pace they were captured.
             let duration = self

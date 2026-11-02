@@ -149,6 +149,12 @@ pub struct SenderControl {
 }
 
 impl SenderControl {
+    /// A handle steering nothing, for tests of what drives an encoder.
+    #[doc(hidden)]
+    pub fn detached() -> Self {
+        Self { tx: mpsc::channel().0 }
+    }
+
     pub fn request_keyframe(&self) {
         let _ = self.tx.send(Control::Keyframe);
     }

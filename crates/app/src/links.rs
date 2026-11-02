@@ -19,6 +19,7 @@ use bytes::Bytes;
 use niscord_media::RgbaImage;
 use niscord_media::audio::FRAME_DURATION;
 use niscord_media::pipeline::{Counters, SenderControl, VideoReceiver};
+use niscord_media::video::suggested_bitrate;
 use niscord_media::windows_audio::AudioReceiver;
 use niscord_protocol::{ClientMsg, IceServer, PeerId, Role, SignalData};
 use niscord_transport::{
@@ -141,6 +142,21 @@ impl Links {
             control.map(|control| Encoder { control, max_bitrate, applied: None, last_keyframe: None });
     }
 
+    /// The size frames are really encoded at, which sets how much bitrate the
+    /// stream may use. What a source reported before sharing can't be trusted:
+    /// a game minimized by Alt+Tab reports a tiny window, which held 720p CS2
+    /// streams at 700 kbps, and windows get resized. Called for every frame
+    /// because the first ones can come before [`Self::set_encoder`].
+    pub fn encoding_size(&self, width: u32, height: u32, fps: u32) {
+        let max = suggested_bitrate(width, height, fps);
+        if let Some(encoder) = self.encoder.lock().unwrap().as_mut()
+            && encoder.max_bitrate != max
+        {
+            tracing::info!(width, height, fps, bps = max, "bitrate limit for this frame size");
+            encoder.max_bitrate = max;
+        }
+    }
+
     /// Queue an encoded frame for every connected viewer.
     pub fn send_frame(&self, data: Bytes, duration: Duration) {
         let _ = self.frames.send((data, duration));
@@ -165,8 +181,8 @@ impl Links {
         self.remove_viewer(viewer);
         let (tx, rx) = mpsc::unbounded_channel();
         self.outgoing.lock().unwrap().insert(viewer, tx);
-        let max = self.encoder.lock().unwrap().as_ref().map_or(INITIAL_BITRATE, |e| e.max_bitrate);
-        let limits = BitrateLimits { initial: INITIAL_BITRATE.min(max), min: MIN_BITRATE.min(max), max };
+        let max = self.encoder.lock().unwrap().as_ref().map_or(INITIAL_BITRATE, |e| max_estimate(e.max_bitrate));
+        let limits = BitrateLimits { initial: INITIAL_BITRATE, min: MIN_BITRATE, max };
         self.rt.spawn(run_outgoing(Arc::downgrade(self), viewer, limits, rx));
     }
 
@@ -470,8 +486,20 @@ async fn steer_bitrate(links: Weak<Links>) {
         // starved of CPU, which also delays every packet it sends.
         let late_ms = due.elapsed().as_millis();
         let Some(links) = links.upgrade() else { return };
-        let estimates: Vec<u32> =
-            links.ready.lock().unwrap().values().filter(|p| p.is_connected()).map(|p| p.target_bitrate()).collect();
+        let max = links.encoder.lock().unwrap().as_ref().map(|e| max_estimate(e.max_bitrate));
+        let estimates: Vec<u32> = links
+            .ready
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.is_connected())
+            .map(|p| {
+                if let Some(max) = max {
+                    p.set_max_bitrate(max);
+                }
+                p.target_bitrate()
+            })
+            .collect();
         if !estimates.is_empty() {
             tracing::debug!(?estimates, late_ms, "bandwidth estimates");
         }
@@ -496,6 +524,13 @@ const AUDIO_RESERVE: u32 = 150_000;
 /// Below this, video is mush anyway; the frame-skipping budget keeps it
 /// within the bandwidth regardless.
 const MIN_VIDEO_BITRATE: u32 = 150_000;
+
+/// The estimate at which video gets all of `max_video`: the inverse of the
+/// share taken in [`next_bitrate`]. Capping the estimate at `max_video` itself
+/// would keep video 15% and the audio reserve below its limit on a fast link.
+fn max_estimate(max_video: u32) -> u32 {
+    ((max_video + AUDIO_RESERVE) as f64 / ESTIMATE_SHARE).ceil() as u32
+}
 
 /// The bitrate to give the encoder, if it should change: a safe share of
 /// the slowest viewer's estimate (or the quality preset's maximum when

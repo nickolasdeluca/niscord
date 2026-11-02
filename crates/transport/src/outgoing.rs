@@ -1,6 +1,6 @@
 //! Sharer side: sends an H.264 track (and optionally Opus) to one viewer.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,8 @@ use crate::common::{self, BaseHandler, CandidateBuffer};
 use crate::pacer::AudioFirstPacer;
 use crate::{OutgoingEvents, SignalData, TransportConfig, forwarder, lossy};
 
-/// Bounds for the bandwidth estimate, in bits per second.
+/// Bounds for the bandwidth estimate, in bits per second. `initial` and `min`
+/// apply as far as `max` allows.
 #[derive(Debug, Clone, Copy)]
 pub struct BitrateLimits {
     pub initial: u32,
@@ -35,19 +36,51 @@ pub struct BitrateLimits {
 /// Publishes the estimator's target so the app can read it; the estimator
 /// itself is owned by the interceptor chain. (Pattern from webrtc-rs's
 /// `bandwidth-estimation-from-disk` example.)
-struct ReportingEstimator<E> {
-    inner: E,
+struct ReportingEstimator {
+    inner: Gcc,
+    limits: BitrateLimits,
+    /// What `limits.max` should become.
+    requested_max: Arc<AtomicU32>,
     target: Arc<AtomicU64>,
 }
 
-impl<E: BandwidthEstimator> ReportingEstimator<E> {
+impl ReportingEstimator {
+    fn new(limits: BitrateLimits, requested_max: Arc<AtomicU32>, target: Arc<AtomicU64>) -> Self {
+        let inner = gcc(limits, limits.initial as f64);
+        Self { inner, limits, requested_max, target }
+    }
+
     fn publish(&self) {
         self.target.store(self.inner.target_bitrate() as u64, Ordering::Relaxed);
     }
+
+    /// `Gcc` can't change its bounds, so a new limit means a new estimator. It
+    /// rarely happens (the frame size changed), so the lost history is cheap.
+    fn apply_requested_max(&mut self) {
+        let max = self.requested_max.load(Ordering::Relaxed);
+        if max == self.limits.max {
+            return;
+        }
+        let current = self.inner.target_bitrate();
+        // An estimate pinned at the old limit says nothing about the link, so
+        // start where a new viewer would. One below it was measured: keep it.
+        let start = match current >= self.limits.max as f64 {
+            true => current.max(self.limits.initial as f64),
+            false => current,
+        };
+        self.limits.max = max;
+        self.inner = gcc(self.limits, start);
+    }
 }
 
-impl<E: BandwidthEstimator> BandwidthEstimator for ReportingEstimator<E> {
+fn gcc(limits: BitrateLimits, start: f64) -> Gcc {
+    let max = limits.max as f64;
+    Gcc::new(start.min(max), (limits.min as f64).min(max), max)
+}
+
+impl BandwidthEstimator for ReportingEstimator {
     fn on_reports(&mut self, now: Instant, reports: &[PacketReport]) {
+        self.apply_requested_max();
         self.inner.on_reports(now, reports);
         self.publish();
     }
@@ -57,6 +90,7 @@ impl<E: BandwidthEstimator> BandwidthEstimator for ReportingEstimator<E> {
     }
 
     fn handle_timeout(&mut self, now: Instant) {
+        self.apply_requested_max();
         self.inner.handle_timeout(now);
         self.publish();
     }
@@ -144,6 +178,7 @@ pub struct OutgoingPeer {
     audio: Option<SendTrack>,
     connected: Arc<AtomicBool>,
     target_bitrate: Arc<AtomicU64>,
+    max_bitrate: Arc<AtomicU32>,
     candidates: CandidateBuffer,
 }
 
@@ -157,13 +192,12 @@ impl OutgoingPeer {
         events: Arc<dyn OutgoingEvents>,
     ) -> Result<Self> {
         let mut engine = common::media_engine()?;
-        let target_bitrate = Arc::new(AtomicU64::new(limits.initial as u64));
-        let estimator = ReportingEstimator {
-            inner: Gcc::new(limits.initial as f64, limits.min as f64, limits.max as f64),
-            target: target_bitrate.clone(),
-        };
+        let initial = limits.initial.min(limits.max);
+        let target_bitrate = Arc::new(AtomicU64::new(initial as u64));
+        let max_bitrate = Arc::new(AtomicU32::new(limits.max));
+        let estimator = ReportingEstimator::new(limits, max_bitrate.clone(), target_bitrate.clone());
         let registry = configure_congestion_control(Registry::new(), estimator, CongestionFeedback::Twcc, &mut engine)?
-            .with(Slot::Pacer, AudioFirstPacer::new(limits.initial as f64));
+            .with(Slot::Pacer, AudioFirstPacer::new(initial as f64));
         let registry = register_default_interceptors(registry, &mut engine)?;
         let mut registry = registry.with(Slot::from(forwarder::SLOT), forwarder::KeyframeRequestForwarder::default());
         if let Some(loss) = &config.simulated_loss {
@@ -201,7 +235,7 @@ impl OutgoingPeer {
         pc.set_local_description(offer.clone()).await?;
         events.signal(common::offer_signal(&offer));
 
-        Ok(Self { pc, video, audio, connected, target_bitrate, candidates: CandidateBuffer::default() })
+        Ok(Self { pc, video, audio, connected, target_bitrate, max_bitrate, candidates: CandidateBuffer::default() })
     }
 
     /// Apply the viewer's answer or one of its ICE candidates.
@@ -250,6 +284,12 @@ impl OutgoingPeer {
         self.target_bitrate.load(Ordering::Relaxed).min(u32::MAX as u64) as u32
     }
 
+    /// Change the ceiling of the bandwidth estimate; it applies with the next
+    /// feedback from the viewer.
+    pub fn set_max_bitrate(&self, bps: u32) {
+        self.max_bitrate.store(bps, Ordering::Relaxed);
+    }
+
     pub async fn close(&self) {
         if let Err(err) = self.pc.close().await {
             tracing::debug!("closing outgoing peer: {err}");
@@ -261,4 +301,45 @@ fn rand_ssrc() -> u32 {
     // Uniqueness per connection is all that matters; avoid a rand dependency.
     use std::hash::{BuildHasher, RandomState};
     (RandomState::new().hash_one(Instant::now()) as u32) | 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn estimator(initial: u32, max: u32) -> (ReportingEstimator, Arc<AtomicU32>, Arc<AtomicU64>) {
+        let limits = BitrateLimits { initial, min: 300_000, max };
+        let requested = Arc::new(AtomicU32::new(max));
+        let target = Arc::new(AtomicU64::new(0));
+        (ReportingEstimator::new(limits, requested.clone(), target.clone()), requested, target)
+    }
+
+    #[test]
+    fn raising_the_limit_frees_an_estimate_pinned_at_the_old_one() {
+        let (mut estimator, requested, target) = estimator(2_500_000, 1_000_000);
+        assert_eq!(estimator.target_bitrate(), 1_000_000.0);
+
+        requested.store(4_000_000, Ordering::Relaxed);
+        estimator.handle_timeout(Instant::now());
+        // Starts where a new viewer would, not creeping up from the old limit.
+        assert_eq!(target.load(Ordering::Relaxed), 2_500_000);
+    }
+
+    #[test]
+    fn raising_the_limit_keeps_an_estimate_measured_below_it() {
+        let (mut estimator, requested, target) = estimator(500_000, 1_000_000);
+
+        requested.store(4_000_000, Ordering::Relaxed);
+        estimator.handle_timeout(Instant::now());
+        assert_eq!(target.load(Ordering::Relaxed), 500_000);
+    }
+
+    #[test]
+    fn lowering_the_limit_lowers_the_estimate() {
+        let (mut estimator, requested, target) = estimator(2_500_000, 4_000_000);
+
+        requested.store(1_000_000, Ordering::Relaxed);
+        estimator.handle_timeout(Instant::now());
+        assert_eq!(target.load(Ordering::Relaxed), 1_000_000);
+    }
 }
