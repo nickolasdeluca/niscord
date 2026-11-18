@@ -243,7 +243,7 @@ release, checks its checksum, installs it for the current user (no admin rights)
 with your server's address (keep it out of public places):
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/nickolasdeluca/niscord/main/install.ps1))) -Server wss://your.server
+& ([scriptblock]::Create((irm https://ndworks.dev/niscord/install.ps1))) -Server wss://your.server
 ```
 
 Without `-Server` they type the address on first launch. Running it again updates
