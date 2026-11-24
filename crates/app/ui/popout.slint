@@ -1,8 +1,8 @@
 import { Tile, StreamTile } from "stage.slint";
 
 // One stream in its own window, like Discord's pop-out: move it to another
-// monitor, resize it, or go full screen. Closing it puts the stream back on
-// the stage.
+// monitor, resize it, or go full screen. Closing it stops watching (your own
+// preview goes back on the stage instead); pop-in docks it.
 export component StreamWindow inherits Window {
     in property <StreamTile> tile;
     in-out property <bool> fullscreen;

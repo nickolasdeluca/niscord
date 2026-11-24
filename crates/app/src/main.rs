@@ -7,6 +7,7 @@ mod logging;
 mod net;
 mod options;
 mod popout;
+mod prefs;
 mod settings;
 mod share;
 mod thumbnails;
@@ -15,7 +16,7 @@ mod update;
 mod watch;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,6 +58,9 @@ struct App {
     viewers_connected: Cell<usize>,
     /// Streams popped out into their own windows, by tile key.
     popouts: RefCell<HashMap<String, StreamWindow>>,
+    /// How each user's stream was last watched; saved by `prefs_timer`.
+    stream_prefs: RefCell<BTreeMap<String, settings::StreamPrefs>>,
+    prefs_timer: slint::Timer,
     /// Whether to show (and decode) your own preview; read by the encoder thread.
     preview: Arc<std::sync::atomic::AtomicBool>,
     shortcut: Cell<Option<hotkey::Shortcut>>,
@@ -300,6 +304,8 @@ fn main() -> anyhow::Result<()> {
         stream_stats: RefCell::new(HashMap::new()),
         viewers_connected: Cell::new(0),
         popouts: RefCell::new(HashMap::new()),
+        stream_prefs: RefCell::new(settings.streams.clone()),
+        prefs_timer: slint::Timer::default(),
         preview: Arc::new(std::sync::atomic::AtomicBool::new(!settings.hide_preview)),
         shortcut: Cell::new(None),
         hotkey: RefCell::new(None),
@@ -359,6 +365,7 @@ fn main() -> anyhow::Result<()> {
             app.picker.borrow_mut().take();
             app.hotkey.borrow_mut().take();
             app.close_all_popouts();
+            app.save_stream_prefs();
             app.share.borrow_mut().take();
             app.links.borrow_mut().take();
             app.session.borrow_mut().take();

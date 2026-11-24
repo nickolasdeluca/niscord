@@ -8,6 +8,7 @@ use niscord_transport::PeerState;
 use slint::Model;
 
 use crate::links::{LinkEvent, Links};
+use crate::settings::{StreamPrefs, stream_key};
 use crate::tiles::{FrameMailbox, SELF_KEY, format_rate, new_tile};
 use crate::{App, StreamTile, with_app};
 
@@ -41,13 +42,19 @@ impl App {
             return;
         }
         let Some(links) = self.links() else { return };
-        if let Err(err) = links.watch(target, 1.0) {
+        let (name, title) = self.peer_share(target);
+        let mut tile = new_tile(key.clone(), &name, &title, false);
+        let prefs = self.stream_prefs.borrow().get(&stream_key(&name)).cloned().unwrap_or_default();
+        apply_prefs(&mut tile, &prefs);
+        if let Err(err) = links.watch(target, effective_volume(&tile)) {
             self.show_notice(format!("Couldn't open the stream: {err}"));
             return;
         }
-        let (name, title) = self.peer_share(target);
-        self.upsert_tile(new_tile(key, &name, &title, false));
+        self.upsert_tile(tile);
         self.send(ClientMsg::Watch { target });
+        if prefs.popped {
+            self.pop_out(&key);
+        }
     }
 
     pub fn unwatch(&self, target: PeerId) {
@@ -92,11 +99,15 @@ impl App {
     pub fn set_stream_volume(&self, key: &str, volume: f32) {
         self.update_tile(key, |tile| tile.volume = volume);
         self.apply_volume(key);
+        self.edit_stream_prefs(key, |prefs| prefs.volume = volume);
     }
 
     pub fn toggle_stream_mute(&self, key: &str) {
         self.update_tile(key, |tile| tile.muted = !tile.muted);
         self.apply_volume(key);
+        if let Some(muted) = self.tile(key).map(|tile| tile.muted) {
+            self.edit_stream_prefs(key, |prefs| prefs.muted = muted);
+        }
     }
 
     fn apply_volume(&self, key: &str) {
@@ -193,4 +204,38 @@ impl App {
 /// What the player should use: the slider's volume unless muted.
 fn effective_volume(tile: &StreamTile) -> f32 {
     if tile.muted { 0.0 } else { tile.volume }
+}
+
+/// Start a new tile the way that user's stream was last watched.
+fn apply_prefs(tile: &mut StreamTile, prefs: &StreamPrefs) {
+    tile.volume = prefs.volume.clamp(0.0, 1.0);
+    tile.muted = prefs.muted;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stream_left_muted_opens_muted() {
+        let mut tile = new_tile("1", "Bob", "Game", false);
+        apply_prefs(&mut tile, &StreamPrefs { volume: 0.6, muted: true, ..StreamPrefs::default() });
+        assert!(tile.muted);
+        assert_eq!(tile.volume, 0.6);
+        assert_eq!(effective_volume(&tile), 0.0);
+    }
+
+    #[test]
+    fn a_new_user_opens_at_full_volume() {
+        let mut tile = new_tile("1", "Bob", "Game", false);
+        apply_prefs(&mut tile, &StreamPrefs::default());
+        assert_eq!(effective_volume(&tile), 1.0);
+    }
+
+    #[test]
+    fn a_corrupt_volume_is_clamped() {
+        let mut tile = new_tile("1", "Bob", "Game", false);
+        apply_prefs(&mut tile, &StreamPrefs { volume: 7.0, ..StreamPrefs::default() });
+        assert_eq!(tile.volume, 1.0);
+    }
 }

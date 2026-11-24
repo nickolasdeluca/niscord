@@ -6,6 +6,8 @@
 
 use slint::{CloseRequestResponse, ComponentHandle};
 
+use crate::prefs::restore_window_place;
+use crate::tiles::SELF_KEY;
 use crate::{App, StreamTile, StreamWindow, with_app};
 
 /// Run `f` on the app after the current UI callback: window callbacks can
@@ -71,17 +73,33 @@ impl App {
                 }
             }
         });
-        window.window().on_close_requested(move || {
-            let k = k.clone();
-            later(move |app| app.pop_in(&k));
-            CloseRequestResponse::HideWindow
+        // Closing a stream's window stops watching it, and it reopens popped
+        // out right there next time (the pop-in button docks it instead).
+        // Your own preview just goes back: closing it mustn't end your share.
+        window.window().on_close_requested({
+            let weak = window.as_weak();
+            move || {
+                // Read the place now: once hidden, the window no longer has one.
+                if let Some(window) = weak.upgrade() {
+                    with_app(|app| app.remember_window_place(&k, &window));
+                }
+                let k = k.clone();
+                later(move |app| if k == SELF_KEY { app.pop_in(&k) } else { app.close_stream(&k) });
+                CloseRequestResponse::HideWindow
+            }
         });
 
         window.set_tile(StreamTile { popped: true, ..tile });
+        let place = self.stream_prefs(key).and_then(|prefs| prefs.window);
+        // Placed both before and after showing: before avoids a flash at the
+        // default spot, after covers a backend that ignores it while hidden.
+        restore_window_place(&window, place);
         if let Err(err) = window.show() {
             self.show_notice(format!("Couldn't open a window: {err}"));
             return;
         }
+        restore_window_place(&window, place);
+        self.edit_stream_prefs(key, |prefs| prefs.popped = true);
         let ui = self.ui();
         if ui.get_focused_stream() == key {
             ui.set_focused_stream("".into());
@@ -95,6 +113,7 @@ impl App {
     pub fn pop_in(&self, key: &str) {
         self.close_popout(key);
         self.update_tile(key, |tile| tile.popped = false);
+        self.edit_stream_prefs(key, |prefs| prefs.popped = false);
     }
 
     /// Mirror a tile change into its window, if it has one.
@@ -104,18 +123,23 @@ impl App {
         }
     }
 
+    /// Close a stream's window. Whether it reopens popped out next time is
+    /// up to the caller: a stream that ended or a disconnect keeps it.
     pub(crate) fn close_popout(&self, key: &str) {
         let window = self.popouts.borrow_mut().remove(key);
         if let Some(window) = window {
+            self.remember_window_place(key, &window);
             let _ = window.hide();
             self.ui().set_popped_count(self.popouts.borrow().len() as i32);
         }
     }
 
-    /// When the main window closes, the pop-outs go with it.
+    /// When the main window closes, the pop-outs go with it (and reopen
+    /// popped out the next time those streams are watched).
     pub fn close_all_popouts(&self) {
-        let windows: Vec<_> = self.popouts.borrow_mut().drain().map(|(_, window)| window).collect();
-        for window in windows {
+        let windows: Vec<_> = self.popouts.borrow_mut().drain().collect();
+        for (key, window) in windows {
+            self.remember_window_place(&key, &window);
             let _ = window.hide();
         }
     }
